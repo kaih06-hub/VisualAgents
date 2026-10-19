@@ -60,6 +60,12 @@ Three questions, then your agents' map pops up:
 VisualAgents then maps the agents, opens the dashboard with the blueprint popup, and offers to **start the project
 now**, **hook it** so it appears whenever you run it yourself, or just show the map.
 
+**Making it live.** The map moves only while the agent is actually working - VisualAgents watches, it doesn't do
+the work. If nothing is running, the map shows a **▶ Start** button: it starts the project in your terminal, and
+you then give the agent its task the way it expects (answer its questions in the terminal, or use its own web
+page). If the start command has a `{task}` slot - e.g. `visualagents run . -- python main.py "{task}"` - the
+dashboard shows a box to type the task in instead. After a run, **▶ Run again** starts the next one.
+
 No API key? `visualagents demo` runs a simulated four-agent crew in 10 seconds.
 
 ## Use it on your own agents

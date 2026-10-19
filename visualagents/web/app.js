@@ -711,6 +711,7 @@
     renderTimeline();
     setRunStatus();
     renderEmptyHint();
+    renderStartCard();
     const vst = viewSt();
     const active = vst.active;
     if (active !== S.lastActive) {
@@ -834,10 +835,17 @@
       box.innerHTML = `
         <div class="now-eyebrow"><span>${ok ? "Run finished" : "Run failed"}</span><span>${esc(dur)}</span></div>
         <div class="now-agent"><span class="status-tag ${ok ? "s-done" : "s-error"}">${icon(ok ? "check" : "x")}${ok ? "Complete" : `Exit code ${run.exit_code}`}</span></div>
-        <div class="now-stats"><span>agents used <b>${Object.values(st.agents).filter((x) => x.visits).length}</b></span><span>handoffs <b>${Math.max(0, (st.path_total || 1) - 1)}</b></span><span>final agent <b>${esc(lastAgent)}</b></span></div>`;
+        <div class="now-stats"><span>agents used <b>${Object.values(st.agents).filter((x) => x.visits).length}</b></span><span>handoffs <b>${Math.max(0, (st.path_total || 1) - 1)}</b></span><span>final agent <b>${esc(lastAgent)}</b></span></div>
+        ${S.scrubT == null && launchInfo() && launchInfo().command ? `<div class="run-again">${startControls("Run again")}</div>` : ""}`;
+      bindStartControls(box);
       return;
     }
-    const waiting = run.status === "running" ? "Output is flowing - waiting for the first agent to speak up…" : S.meta.mode === "blueprint" ? "Blueprint view - no run attached." : "Waiting for the run to start…";
+    const info = launchInfo();
+    const waiting = run.status === "running" ? "Output is flowing - waiting for the first agent to speak up…"
+      : S.starting ? "Starting - give it its task in your terminal."
+      : info && info.command ? "Not running yet - press ▶ Start on the map, then give it a task."
+      : S.meta.mode === "hook" ? "Waiting for it to run - start it the way you usually do."
+      : "Waiting for the run to start…";
     box.innerHTML = `<div class="now-eyebrow"><span>${at}</span><span>${esc(stepTxt)}</span></div><div class="now-role" style="margin-top:8px">${esc(waiting)}</div>`;
   }
 
@@ -900,6 +908,87 @@
     const end = run.ended || now();
     t.textContent = fmtClock(end - run.started);
     if (run.status === "running") renderTimeline();
+  }
+
+  // ---------------------------------------------------------------- making it live
+  const launchInfo = () => S.meta && S.meta.launch;
+
+  function startControls(label) {
+    const info = launchInfo();
+    return `
+      ${info.takes_task ? `<input class="task" type="text" placeholder="What should it do?" aria-label="Task for the agent">` : ""}
+      <div class="start-row">
+        <button class="btn primary start-btn">${icon("play")}${label}</button>
+        <span class="cmd"><code>${esc(info.command)}</code></span>
+      </div>`;
+  }
+
+  function bindStartControls(root) {
+    const btn = $(".start-btn", root);
+    if (!btn) return;
+    const input = $(".task", root);
+    const go = async () => {
+      btn.disabled = true;
+      const task = input ? input.value.trim() : "";
+      let out = { ok: false, message: "Couldn't reach VisualAgents." };
+      try {
+        out = await (await fetch(q("/api/start"), { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task }) })).json();
+      } catch { /* shown below */ }
+      if (out.launch) S.meta.launch = out.launch;
+      S.startMessage = out.message;
+      S.starting = !!out.ok;
+      btn.disabled = false;
+      renderStartCard();
+      if (!out.ok && input) input.focus();
+    };
+    btn.onclick = go;
+    if (input) input.onkeydown = (e) => { if (e.key === "Enter") go(); };
+  }
+
+  function renderStartCard() {
+    const card = $("#start-card");
+    const st = S.st;
+    const running = st.run.status === "running";
+    if (running) S.starting = false;
+    const show = !running && !st.path_total && st.run.status === "idle" && S.scrubT == null
+      && !["demo", "replay", "daemon-empty"].includes(S.meta.mode);
+    if (!show) {
+      card.hidden = true;
+      return;
+    }
+    const name = esc(S.bp.project);
+    const info = launchInfo();
+    let html;
+    if (S.starting) {
+      html = `<h3><span class="dot"></span>Starting ${name}…</h3>
+        <p>${esc(S.startMessage || "")} The map lights up as soon as its agents start working.</p>`;
+    } else if (S.meta.mode === "hook") {
+      html = `<h3><span class="dot"></span>Waiting for ${name}</h3>
+        <p>Start it the way you usually do - your IDE, a script, a notebook. It appears here as soon as it calls an LLM.</p>`;
+    } else if (S.meta.mode === "pipe" || S.meta.mode === "watch") {
+      html = `<h3><span class="dot"></span>Waiting for output…</h3><p>The map comes alive as the agent's output arrives.</p>`;
+    } else if (info && info.command) {
+      html = `<h3><span class="dot"></span>Not running yet</h3>
+        <p>The map comes alive while ${name} works on something. Start it, then give it a task the way it expects -
+        answer its questions in your terminal, or use its own web page.</p>
+        ${startControls("Start")}
+        ${S.startMessage ? `<p class="small">${esc(S.startMessage)}</p>` : ""}`;
+    } else if (info) {
+      html = `<h3><span class="dot"></span>Not running yet</h3>
+        <p>VisualAgents doesn't know how to start ${name} yet. Tell it once in your terminal:</p>
+        <p><code>${esc(info.hint)}</code></p>`;
+    } else {
+      card.hidden = true;
+      return;
+    }
+    card.classList.toggle("waiting", !!S.starting || S.meta.mode === "hook");
+    if (card.dataset.html !== html) {
+      card.dataset.html = html;
+      card.innerHTML = html;
+      bindStartControls(card);
+    }
+    card.hidden = false;
   }
 
   function renderEmptyHint() {
@@ -1313,6 +1402,7 @@
     $("#tl-live").onclick = goLive;
     $("#tl-play").onclick = togglePlay;
     const speeds = [1, 2, 4, 8, 16];
+    $("#tl-play").innerHTML = icon("play");
     const speedBtn = $("#tl-speed");
     speedBtn.textContent = `${S.speed}×`;
     speedBtn.onclick = () => {
@@ -1452,45 +1542,48 @@
   function renderBlueprintModal() {
     const bp = S.bp;
     $("#bp-title").textContent = bp.project;
-    const body = $("#bp-body");
     const chips = (ids) => ids.map((id) => `<span class="chip" style="--agent:${colorVar(id)}"><i></i>${esc(nameOf(id))}</span>`).join("");
     const facts = [
-      bp.framework && `<span class="badge">${esc(bp.framework)}</span>`,
-      `<span class="badge">${S.agents.length} agent${S.agents.length === 1 ? "" : "s"}</span>`,
-      `<span class="badge">${bp.edges.length} handoff${bp.edges.length === 1 ? "" : "s"}</span>`,
-      bp.entry.length && `<span class="badge">starts at ${esc(bp.entry.map(nameOf).join(", "))}</span>`,
-      bp.exits.length && `<span class="badge">answers from ${esc(bp.exits.map(nameOf).join(", "))}</span>`,
-    ].filter(Boolean).join("");
+      bp.framework && ["Framework", esc(bp.framework)],
+      ["Size", `${S.agents.length} agent${S.agents.length === 1 ? "" : "s"} · ${bp.edges.length} handoff${bp.edges.length === 1 ? "" : "s"}`],
+      bp.entry.length && ["Starts at", chips(bp.entry)],
+      bp.exits.length && ["Answer from", chips(bp.exits)],
+    ].filter(Boolean).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
     const steps = (bp.steps || []).map((s) => `
-      <div class="bp-step">
-        <div class="bp-step-num">STEP ${s.order}</div>
-        <h4>${esc(s.title)}</h4>
-        <div class="chips">${chips(s.agents)}</div>
-        ${s.description ? `<p>${esc(s.description)}</p>` : ""}
-      </div>`).join("");
+      <li>
+        <span class="bp-num">${s.order}</span>
+        <div class="bp-step-body">
+          <h4>${esc(s.title)}</h4>
+          ${s.agents.length ? `<div class="chips">${chips(s.agents)}</div>` : ""}
+          ${s.description ? `<p>${esc(s.description)}</p>` : ""}
+        </div>
+      </li>`).join("");
     const agents = S.agents.map((a) => `
-      <div class="bp-agent" style="--agent:${colorVar(a.id)}">
-        <h4><span class="node-dot"></span>${esc(a.name)}${a.dynamic ? ' <span class="tag">runtime</span>' : ""}</h4>
-        ${a.role ? `<div class="role">${esc(a.role)}</div>` : ""}
+      <li style="--agent:${colorVar(a.id)}">
+        <div class="bp-agent-head"><span class="node-dot"></span><b>${esc(a.name)}</b>
+          ${a.role ? `<span class="role">${esc(a.role)}</span>` : ""}${a.dynamic ? '<span class="tag">runtime</span>' : ""}</div>
         ${a.description ? `<p>${esc(a.description)}</p>` : ""}
         ${a.tools && a.tools.length ? `<div class="tools">${a.tools.map((t) => `<span class="tool-chip">${esc(t)}</span>`).join("")}</div>` : ""}
         ${a.file ? `<div class="src">${esc(a.file)}${a.line ? ":" + a.line : ""}</div>` : ""}
-      </div>`).join("");
+      </li>`).join("");
     const edges = bp.edges.map((e) => `
-      <div class="bp-edge">${chips([e.from])}<span class="arrow-txt">${e.conditional ? "⇢" : "→"}</span>${chips([e.to])}
-        ${e.label ? `<span class="lbl">${esc(e.label)}</span>` : ""}${e.conditional ? '<span class="tag">conditional</span>' : ""}</div>`).join("");
-    body.innerHTML = `
+      <li>${chips([e.from])}<span class="arrow-txt">${e.conditional ? "⇢" : "→"}</span>${chips([e.to])}
+        ${e.label ? `<span class="lbl">${esc(e.label)}</span>` : ""}${e.conditional ? '<span class="tag">if needed</span>' : ""}</li>`).join("");
+    $("#bp-body").innerHTML = `
       ${bp.summary ? `<p class="bp-summary">${esc(bp.summary)}</p>` : ""}
-      <div class="bp-facts">${facts}</div>
-      ${steps ? `<div class="bp-section-title">How a query flows</div><div class="bp-steps">${steps}</div>` : ""}
-      <div class="bp-section-title">Agents</div><div class="bp-agents">${agents || '<span class="muted">No agents detected.</span>'}</div>
-      ${edges ? `<div class="bp-section-title">Handoffs</div><div class="bp-edges">${edges}</div>` : ""}`;
+      <dl class="bp-facts">${facts}</dl>
+      ${steps ? `<h3 class="bp-section-title">How a request flows</h3><ol class="bp-timeline">${steps}</ol>` : ""}
+      <h3 class="bp-section-title">Agents</h3>
+      ${agents ? `<ul class="bp-agent-list">${agents}</ul>` : '<p class="muted">No agents detected.</p>'}
+      ${edges ? `<h3 class="bp-section-title">Handoffs</h3><ul class="bp-edge-list">${edges}</ul>` : ""}`;
     const gen = bp.generated_by ? `Mapped by ${bp.generated_by}` : "";
     $("#bp-meta").textContent = [gen, bp.generated_at ? new Date(bp.generated_at).toLocaleString() : ""].filter(Boolean).join(" · ");
   }
 
   function openModal(auto) {
     S.modalAuto = !!auto;
+    const live = S.st && (S.st.run.status === "running" || S.st.path_total);
+    $(".modal-foot .btn.primary").textContent = live ? "Watch it live" : "Show the map";
     $("#blueprint-modal").hidden = false;
     $(".modal-card [data-close].icon-btn").focus({ preventScroll: true });
   }

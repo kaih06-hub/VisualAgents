@@ -117,6 +117,21 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     hub.feed_structured(item)
             self._json({"ok": True, "count": len(items)})
+        elif path == "/api/start":
+            if not self._same_origin():
+                self._json({"error": "cross-origin"}, HTTPStatus.FORBIDDEN)
+                return
+            hub = self._hub(urlparse(self.path))
+            if hub.launcher is None:
+                self._json({"ok": False, "message": "Start it the way you usually do - it shows up here."})
+                return
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                body = {}
+            task = str(body.get("task") or "").strip() or None
+            ok, message = hub.launcher.start(task)
+            self._json({"ok": ok, "message": message, "launch": hub.launcher.info()})
         elif path == "/api/reset":
             if not self._same_origin():
                 self._json({"error": "cross-origin"}, HTTPStatus.FORBIDDEN)

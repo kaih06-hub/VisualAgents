@@ -300,9 +300,12 @@ def cmd_blueprint(args, _command) -> int:
 def cmd_show(args, _command) -> int:
     project = args.project.resolve()
     bp = _project_blueprint(project, args)
-    hub = Hub(bp, meta={"mode": "blueprint", "project": str(project)})
-    server = _serve(hub, args, "blueprint only - use `visualagents run` to watch a live run")
-    _hold(server, "Showing the blueprint.")
+    from .launcher import Launcher
+
+    hub = Hub(bp, record_dir=_record_dir(project, args), meta={"mode": "blueprint", "project": str(project)})
+    server = _serve(hub, args, "press ▶ Start in the dashboard (or Ctrl+C) - the agent runs in this terminal")
+    Launcher(project, hub, server.url)
+    _hold(server, "Showing the map.")
     return 0
 
 
@@ -316,6 +319,7 @@ def cmd_run(args, command: list[str]) -> int:
         termui.error(f"{project} is not a folder")
         return 2
     cwd = args.cwd.resolve() if args.cwd else project
+    explicit = bool(command)
     if command:
         if command[0].endswith(".py") and not shutil.which(command[0]) and (cwd / command[0]).exists():
             command = [shutil.which("python3") or shutil.which("python") or sys.executable, *command]
@@ -335,6 +339,10 @@ def cmd_run(args, command: list[str]) -> int:
     hub = Hub(bp, record_dir=_record_dir(project, args),
               meta={"mode": "run", "project": str(project), "command": " ".join(command)})
     server = _serve(hub, args, f"running: {' '.join(command)}")
+    from .launcher import Launcher
+
+    exact = detect.Candidate(list(command), os.path.relpath(cwd, project)) if explicit else None
+    Launcher(project, hub, server.url, instrument=not args.no_instrument, fixed=exact)  # "Run again" from the dashboard
 
     narrator = None
     if args.smart:

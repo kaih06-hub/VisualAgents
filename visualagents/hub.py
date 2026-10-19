@@ -28,6 +28,7 @@ class Hub:
         self.state_version = 0
         self.recent_lines: deque[str] = deque(maxlen=60)
         self.procs: set[int] = set()  # hooked processes currently reporting (daemon mode)
+        self.launcher = None  # set when the dashboard may start the project (launcher.Launcher)
         self.lines_seen = 0
         self.started_at = time.time()
         self._record = None
@@ -109,7 +110,8 @@ class Hub:
                 "blueprint": self.blueprint,
                 "state": self.tracker.snapshot(),
                 "events": list(self.events)[-max_events:],
-                "meta": {**self.meta, "lines": self.lines_seen, "record": str(self.record_path or "")},
+                "meta": {**self.meta, "lines": self.lines_seen, "record": str(self.record_path or ""),
+                         "launch": self.launcher.info() if self.launcher else None},
                 "version": self.state_version,
             }
 

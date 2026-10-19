@@ -191,7 +191,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(e, dict):
             continue
         src, dst = resolve(e.get("from") or e.get("source")), resolve(e.get("to") or e.get("target"))
-        if not src or not dst or (src, dst) in seen_edges:
+        if not src or not dst or src == dst or (src, dst) in seen_edges:
             continue
         seen_edges.add((src, dst))
         bp["edges"].append(

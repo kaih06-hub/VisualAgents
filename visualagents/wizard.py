@@ -272,8 +272,11 @@ def show_and_watch(project: Path, bp: dict[str, Any], args: argparse.Namespace) 
 
     record = bpmod.state_dir(project) / "runs"
     record.mkdir(parents=True, exist_ok=True)
+    from .launcher import Launcher
+
     hub = Hub(bp, record_dir=record, meta={"mode": "setup", "project": str(project)})
     server = Server(hub, port=getattr(args, "port", 7420) or 7420).start()
+    Launcher(project, hub, server.url)
     if not getattr(args, "no_browser", False) and not os.environ.get("VISUALAGENTS_NO_BROWSER"):
         webbrowser.open(server.url)
     tui.ok(f"Map is open at {termui.accent(server.url)}")
@@ -300,7 +303,7 @@ def show_and_watch(project: Path, bp: dict[str, Any], args: argparse.Namespace) 
         return cli.cmd_hook(ns, [])
     if action.startswith("Just"):
         if not getattr(args, "exit", False):
-            _hold(server, "Showing the map.")
+            _hold(server, "Showing the map. Press ▶ Start in the dashboard whenever you want to run it.")
         server.stop()
         return 0
     cand = first if action == "Start it now" else _choose_start_command(project, force_menu=True)
@@ -311,7 +314,9 @@ def show_and_watch(project: Path, bp: dict[str, Any], args: argparse.Namespace) 
     command, notes = detect.resolve(project, cand)
     for n in notes:
         tui.note(termui.dim(n))
-    tui.note(termui.dim(f"$ {' '.join(command)}") + "\n")
+    tui.note(termui.dim(f"$ {' '.join(command)}"))
+    tui.note(f"{termui.bold(project.name + ' is starting below.')} Give it a task the way it expects - answer its "
+             f"questions here, or open its own web page - and watch the map light up.\n")
     install_sigterm_handler()
     stop_logs = threading.Event()
     threading.Thread(target=follow_new_logs, args=(project, hub), daemon=True,
