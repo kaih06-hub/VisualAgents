@@ -27,6 +27,7 @@ class Hub:
         self.events: deque[dict[str, Any]] = deque(maxlen=20000)
         self.state_version = 0
         self.recent_lines: deque[str] = deque(maxlen=60)
+        self.procs: set[int] = set()  # hooked processes currently reporting (daemon mode)
         self.lines_seen = 0
         self.started_at = time.time()
         self._record = None
@@ -46,7 +47,26 @@ class Hub:
             self._publish(self.tracker.ingest_line(line, stream))
 
     def feed_structured(self, payload: dict[str, Any]) -> None:
+        typ = payload.get("type")
         with self.cond:
+            if typ == "process_start":
+                pid = int(payload.get("pid") or 0)
+                if not self.procs and self.tracker.run["status"] != "running":
+                    self._write_record({"type": "run_start", "command": payload.get("text", "")})
+                    self._publish(self.tracker.run_started(str(payload.get("text") or "")))
+                self.procs.add(pid)
+                self._publish([self.tracker._event("status", None, f"Process {pid} attached: {payload.get('text', '')}",
+                                                   source="system")])
+                return
+            if typ == "process_end":
+                pid = int(payload.get("pid") or 0)
+                if pid not in self.procs:
+                    return
+                self.procs.discard(pid)
+                if not self.procs:
+                    self._write_record({"type": "run_end", "code": payload.get("code", 0)})
+                    self._publish(self.tracker.run_finished(payload.get("code", 0)))
+                return
             self._write_record({"type": "structured", "payload": payload})
             self._publish(self.tracker.ingest_structured(payload))
 

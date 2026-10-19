@@ -197,3 +197,8 @@ def test_dotenv_supplies_keys_and_model_choice(monkeypatch, tmp_path):
     assert os.environ["GEMINI_API_KEY"] == "abc"
     assert os.environ["VISUALAGENTS_MODEL"] == "gemini-flash-latest"
     assert "UNRELATED" not in os.environ
+
+
+def test_run_options_may_follow_the_folder(tmp_path):
+    assert cli._split_run_argv(["run", str(tmp_path), "--exit", "--port", "0", "--static"]) == (
+        ["run", str(tmp_path), "--exit", "--port", "0", "--static"], [])

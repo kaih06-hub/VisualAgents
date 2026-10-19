@@ -74,6 +74,12 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .brand svg circle:nth-child(2) { fill: var(--c3); }
 .brand svg circle:nth-child(3) { fill: var(--c2); }
 .project { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.project-switch {
+  font: 600 13px var(--font); color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 8px; max-width: 240px; cursor: pointer;
+}
+.project-switch[hidden] + .project-name { display: inline; }
+.project-switch:not([hidden]) + .project-name { display: none; }
 .project-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--surface-2);

@@ -55,6 +55,9 @@ def load_dotenv_keys(project: Path) -> None:
             k, v = k.strip(), v.strip().strip("'\"")
             if k in _DOTENV_VARS and v and not os.environ.get(k):
                 os.environ[k] = v
+    from . import home
+
+    home.apply_saved()  # keys and choices saved by the setup wizard come last
 
 
 def has_credentials(provider: str) -> bool:

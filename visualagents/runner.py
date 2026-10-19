@@ -98,7 +98,7 @@ def build_env(server_url: str, token: str, *, instrument: bool, use_pty: bool) -
     env["PYTHONIOENCODING"] = env.get("PYTHONIOENCODING", "utf-8")
     env["VISUALAGENTS_URL"] = server_url
     env["VISUALAGENTS_TOKEN"] = token
-    env["VISUALAGENTS_CHANNEL"] = "stderr"  # in-band markers keep events ordered with printed output
+    env.pop("VISUALAGENTS_STREAM_ID", None)  # set per child once its pipe / pty exists
     if instrument:
         parts = [autoinstrument_dir()] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
         env["PYTHONPATH"] = os.pathsep.join(parts)
@@ -154,6 +154,7 @@ def _run_pty(command, hub, cwd, env, echo_fn) -> int:
     import termios
 
     master, slave = pty.openpty()
+    env["VISUALAGENTS_STREAM_ID"] = _stream_id(slave)
     try:
         size = os.get_terminal_size(sys.stdout.fileno())
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size.lines, size.columns, 0, 0))
@@ -186,13 +187,23 @@ def _run_pty(command, hub, cwd, env, echo_fn) -> int:
     return code
 
 
+def _stream_id(fd: int) -> str:
+    st = os.fstat(fd)
+    return f"{st.st_dev}:{st.st_ino}"
+
+
 def _run_pipes(command, hub, cwd, env, echo_fn) -> int:
     # stderr is merged into stdout (as on a terminal) so lines and event markers stay in order.
-    proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    read_fd, write_fd = os.pipe()
+    env["VISUALAGENTS_STREAM_ID"] = _stream_id(write_fd)
+    try:
+        proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=write_fd, stderr=write_fd)
+    finally:
+        os.close(write_fd)
     splitter = LineSplitter(lambda line: hub.feed_line(line, "stdout"), echo_fn)
 
     def pump():
-        fd = proc.stdout.fileno()
+        fd = read_fd
         while True:
             try:
                 data = os.read(fd, 65536)
@@ -207,17 +218,23 @@ def _run_pipes(command, hub, cwd, env, echo_fn) -> int:
     t.start()
     code = _wait_interruptibly(proc)
     t.join(timeout=2.0)
+    try:
+        os.close(read_fd)
+    except OSError:
+        pass
     return code
 
 
-def follow_file(path: Path, hub: Hub, *, from_start: bool = False, echo: bool = False, stop: threading.Event | None = None) -> None:
+def follow_file(path: Path, hub: Hub, *, from_start: bool = False, echo: bool = False,
+                stop: threading.Event | None = None, announce: bool = True, stream: str = "stdout") -> None:
     """`tail -F` a log file into the hub until `stop` is set (or Ctrl+C)."""
     stop = stop or threading.Event()
     pos = 0
     inode = None
     first = True
     buf = ""
-    hub.run_started(f"tail {path}")
+    if announce:
+        hub.run_started(f"tail {path}")
     while not stop.is_set():
         try:
             st = path.stat()
@@ -237,9 +254,36 @@ def follow_file(path: Path, hub: Hub, *, from_start: bool = False, echo: bool = 
             for line in lines:
                 if echo:
                     _terminal_echo(line + "\n")
-                hub.feed_line(line)
+                hub.feed_line(line, stream)
         else:
             stop.wait(0.2)
+
+
+_LOG_SKIP = {".git", "node_modules", "__pycache__", ".visualagents", "venv", ".venv", "site-packages", "dist", "build"}
+
+
+def follow_new_logs(project: Path, hub: Hub, *, since: float, stop: threading.Event, max_depth: int = 3) -> None:
+    """Follow *.log files the app writes during the run (e.g. a start script sending the backend to .logs/)."""
+    project = Path(project).resolve()
+    following: set[Path] = set()
+    while not stop.wait(1.0):
+        for dirpath, dirnames, filenames in os.walk(project):
+            depth = len(Path(dirpath).relative_to(project).parts)
+            dirnames[:] = [] if depth >= max_depth else [d for d in dirnames if d not in _LOG_SKIP]
+            for name in filenames:
+                if not name.endswith((".log", ".out")):
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    if p in following or p.stat().st_mtime < since:
+                        continue
+                except OSError:
+                    continue
+                following.add(p)
+                rel = str(p.relative_to(project))
+                hub.system(f"Following {rel}")
+                threading.Thread(target=follow_file, args=(p, hub), daemon=True,
+                                 kwargs={"from_start": True, "stop": stop, "announce": False, "stream": rel}).start()
 
 
 def read_stream(stream: Iterable[bytes] | None, hub: Hub, *, echo: bool = True) -> None:

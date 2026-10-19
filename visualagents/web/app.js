@@ -68,19 +68,26 @@
     drawerId: null, drawerTimer: 0, narrated: false, wasDisconnected: false, es: null,
     bubbleText: "", moved: {}, shift: { x: 0, y: 0 },
     scrubT: null, hist: null, playing: false, speed: 4, hoverItem: null,
+    projectId: new URLSearchParams(location.search).get("project") || "", projects: [],
   };
+
+  const q = (path) => (S.projectId ? `${path}${path.includes("?") ? "&" : "?"}project=${encodeURIComponent(S.projectId)}` : path);
 
   const wrap = $("#canvas-wrap"), canvas = $("#canvas"), edgesSvg = $("#edges"), nodesEl = $("#nodes");
   const feedEl = $("#feed");
 
   // ---------------------------------------------------------------- data
   async function loadState() {
-    const res = await fetch("/api/state", { cache: "no-store" });
+    const res = await fetch(q("/api/state"), { cache: "no-store" });
     const data = await res.json();
     S.bp = data.blueprint;
     S.meta = data.meta || {};
     S.st = data.state;
+    if (!S.projectId && S.meta.project_id) S.projectId = S.meta.project_id;
     S.seqMax = 0;
+    S.hist = S.fullHist = null;
+    S.scrubT = null;
+    S.layoutSig = "";
     S.events = [];
     S.lastItem = null;
     S.layoutSig = "";
@@ -98,7 +105,7 @@
 
   function connect() {
     if (S.es) S.es.close();
-    const es = new EventSource(`/api/stream?since=${S.seqMax}`);
+    const es = new EventSource(q(`/api/stream?since=${S.seqMax}`));
     S.es = es;
     es.addEventListener("ev", (e) => {
       const ev = JSON.parse(e.data);
@@ -897,14 +904,47 @@
 
   function renderEmptyHint() {
     const box = $("#empty-hint");
-    if (!S.agents.length) {
+    if (!S.agents.length && S.meta.mode !== "daemon-empty") {
       box.hidden = false;
       box.innerHTML = `<b>No agents found yet.</b><br>Try an LLM scan for a deeper read of the code:<br><br><code>visualagents scan --llm</code>`;
-    } else if (S.meta.mode === "blueprint" && S.st.run.status === "idle" && !S.st.path_total) {
-      box.hidden = true;
+    } else if (S.meta.mode === "daemon-empty") {
+      box.hidden = false;
+      box.innerHTML = `<b>No hooked projects yet.</b><br>Hook a folder once, then start your agent the way you always do:<br><br><code>visualagents hook ~/my-agent</code>`;
     } else {
       box.hidden = true;
     }
+  }
+
+  // ---------------------------------------------------------------- projects (background dashboard)
+  async function refreshProjects() {
+    let data;
+    try {
+      data = await (await fetch("/api/projects", { cache: "no-store" })).json();
+    } catch { return; }
+    S.projects = data.projects || [];
+    const sel = $("#project-switch");
+    sel.hidden = !(data.daemon && S.projects.length > 1);
+    if (sel.hidden) return;
+    const dot = { running: "●", finished: "✓", failed: "✕" };
+    sel.innerHTML = S.projects
+      .map((p) => `<option value="${esc(p.id)}">${dot[p.status] ? dot[p.status] + " " : ""}${esc(p.name)}</option>`)
+      .join("");
+    sel.value = S.projectId || (S.meta.project_id || "");
+  }
+
+  async function switchProject(id) {
+    if (!id || id === S.projectId) return;
+    S.projectId = id;
+    const url = new URL(location.href);
+    url.searchParams.set("project", id);
+    history.replaceState(null, "", url);
+    if (S.es) S.es.close();
+    S.slot = {};
+    S.filter = null;
+    S.lastActive = undefined; // refresh the tab title for the new project
+    closeDrawer();
+    await loadState();
+    connect();
   }
 
   // ---------------------------------------------------------------- feed
@@ -1463,7 +1503,7 @@
   function maybeAutoOpenBlueprint() {
     const key = `va-bp-seen:${S.bp.project}`;
     const mode = S.meta.mode;
-    if (mode === "blueprint" || mode === "demo" || !store.get(key)) {
+    if (mode === "blueprint" || mode === "demo" || mode === "setup" || !store.get(key)) {
       store.set(key, "1");
       if (!(S.st.active && mode !== "blueprint")) openModal(mode !== "blueprint");
     }
@@ -1566,7 +1606,7 @@
     document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeModal));
     $("#drawer-close").onclick = closeDrawer;
     $("#hide-logs").onchange = (e) => { S.hideLogs = e.target.checked; rebuildFeed(); };
-    $("#reset-view").onclick = () => fetch("/api/reset", { method: "POST" });
+    $("#reset-view").onclick = () => fetch(q("/api/reset"), { method: "POST" });
     feedEl.addEventListener("scroll", () => {
       const atEnd = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 40;
       if (S.programmaticScroll) {
@@ -1588,6 +1628,8 @@
     });
     bindViewport();
     bindTimeline();
+    $("#project-switch").onchange = (e) => switchProject(e.target.value);
+    setInterval(refreshProjects, 5000);
     bindHover(feedEl);
     bindHover($("#drawer-body"));
     setInterval(tickTimer, 1000);
@@ -1595,7 +1637,7 @@
 
   bindUI();
   loadState()
-    .then(connect)
+    .then(() => { refreshProjects(); connect(); })
     .catch((err) => {
       console.error(err);
       setRunStatus(true);

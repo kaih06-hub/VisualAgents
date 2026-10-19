@@ -21,14 +21,16 @@ from .llm import PROVIDERS, LLMError, detect_provider, load_dotenv_keys
 from .server import Server
 
 DEFAULT_PORT = 7420
+DAEMON_PORT = 7400
 _VALUE_OPTS = {"--port", "--host", "--provider", "--model", "--narrate-model", "--blueprint", "--cwd", "--interval"}
 
 EPILOG = """examples:
   visualagents demo                                  see it work in 10 seconds, no API key needed
-  visualagents scan ./my-crew                        map the agents in a project (LLM if a key is set)
-  visualagents run ./my-crew -- python main.py "q"   run it and watch the live map
-  python main.py 2>&1 | visualagents pipe ./my-crew  monitor output you already have
-  visualagents watch ./my-crew --log run.log         follow a log file
+  visualagents run ./my-agent                        start a project and watch it (asks how, once)
+  visualagents hook ./my-agent                       once: then run it however you like (IDE, scripts...)
+  visualagents scan ./my-agent                       (re)map the agents in a project
+  visualagents run ./my-agent -- python main.py "q"  run an exact command
+  python main.py 2>&1 | visualagents pipe ./my-agent monitor output you already have
 """
 
 
@@ -80,8 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
     _server_opts(p)
     _scan_opts(p)
 
-    p = sub.add_parser("run", help="run an agent command and map it live:  run [project] -- <command>",
-                       description="Run a command (your agent) with live mapping. Put the command after `--`.")
+    p = sub.add_parser("run", help="start a project and map it live:  run [folder] [-- command]",
+                       description="Start a project with live mapping. Without a command, VisualAgents finds how "
+                                   "the project starts (README, start scripts, app files), asks once and remembers.")
     p.add_argument("project", nargs="?", default=None, type=Path, help="project folder (default: current folder)")
     _server_opts(p)
     _scan_opts(p)
@@ -93,6 +96,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-instrument", action="store_true", help="don't auto-hook LangChain/LangGraph/OpenAI Agents")
     p.add_argument("--no-pty", action="store_true", help="use plain pipes instead of a pseudo-terminal")
     p.add_argument("--no-record", action="store_true", help="don't save the run under .visualagents/runs/")
+    p.add_argument("--pick", action="store_true", help="choose the start command again")
+    p.add_argument("--no-follow-logs", action="store_true", help="don't follow *.log files the app writes")
+
+    p = sub.add_parser("hook", help="hook a folder once - then run its agent however you normally do",
+                       description="Install a startup hook into the folder's virtualenv(s) so every Python process "
+                                   "from them reports to the background dashboard (`visualagents up`).")
+    p.add_argument("project", nargs="?", default=".", type=Path)
+    p.add_argument("--python", type=Path, action="append", default=[],
+                   help="also hook this interpreter (e.g. a conda env's python); repeatable")
+    p.add_argument("--no-scan", action="store_true", help="don't build a blueprint now")
+    p.add_argument("--no-daemon", action="store_true", help="don't start the background dashboard")
+    p.add_argument("--port", type=int, default=DAEMON_PORT)
+    p.add_argument("--no-browser", action="store_true")
+    _scan_opts(p)
+
+    p = sub.add_parser("unhook", help="remove the startup hook from a folder's virtualenv(s)")
+    p.add_argument("project", nargs="?", default=".", type=Path)
+
+    p = sub.add_parser("up", help="start the background dashboard for hooked projects")
+    p.add_argument("--port", type=int, default=DAEMON_PORT)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--foreground", action="store_true", help="stay in this terminal instead of the background")
+
+    sub.add_parser("down", help="stop the background dashboard")
+    sub.add_parser("status", help="show the background dashboard and hooked projects")
+
+    p = sub.add_parser("open", help="open the dashboard for a hooked project")
+    p.add_argument("project", nargs="?", default=".", type=Path)
 
     p = sub.add_parser("pipe", help="map output piped on stdin:  python app.py 2>&1 | visualagents pipe")
     p.add_argument("project", nargs="?", default=".", type=Path)
@@ -117,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--instant", action="store_true", help="jump straight to the end state")
     _server_opts(p)
 
+    p = sub.add_parser("setup", help="guided start: pick a project, an LLM and a key - then the map pops up "
+                                     "(also what bare `visualagents` does in a terminal)")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--exit", action="store_true", help=argparse.SUPPRESS)
+
     p = sub.add_parser("models", help="show LLM providers, which have keys, and the models you can pick")
     p.add_argument("project", nargs="?", default=".", type=Path, help="also read keys from this project's .env")
     p.add_argument("--provider", choices=list(PROVIDERS), help="list the models this provider's account can use")
@@ -128,30 +166,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _split_run_argv(argv: list[str]) -> tuple[list[str], list[str]]:
-    """`run [opts] [project] -- cmd...` (or without `--`: everything after the project is the command)."""
+    """`run [opts] [folder] [opts] -- cmd...`; without `--`, the command starts at the first token that is
+    neither an option nor the project folder."""
     if "--" in argv:
         i = argv.index("--")
         return argv[:i], argv[i + 1:]
     if not argv or argv[0] != "run":
         return argv, []
-    ours, i = ["run"], 1
-    while i < len(argv) and argv[i].startswith("-"):
-        ours.append(argv[i])
-        if argv[i] in _VALUE_OPTS and i + 1 < len(argv):
-            ours.append(argv[i + 1])
-            i += 1
+    ours, rest, i, have_project = ["run"], argv[1:], 0, False
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("-"):
+            ours.append(tok)
+            if tok in _VALUE_OPTS and i + 1 < len(rest):
+                ours.append(rest[i + 1])
+                i += 1
+        elif not have_project and Path(tok).is_dir():
+            ours.append(tok)
+            have_project = True
+        else:
+            break
         i += 1
-    rest = argv[i:]
-    if rest and Path(rest[0]).is_dir():
-        ours.append(rest[0])
-        rest = rest[1:]
-    return ours, rest
+    return ours, rest[i:]
 
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     ours, command = _split_run_argv(raw)
     parser = build_parser()
+    if not ours and sys.stdin.isatty() and sys.stderr.isatty():
+        ours = ["setup"]  # bare `visualagents` in a terminal: the guided start
     args = parser.parse_args(ours)
     if not args.cmd:
         parser.print_help()
@@ -160,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
         return {
             "scan": cmd_scan, "blueprint": cmd_blueprint, "show": cmd_show, "run": cmd_run, "pipe": cmd_pipe,
             "watch": cmd_watch, "replay": cmd_replay, "demo": cmd_demo, "models": cmd_models,
+            "hook": cmd_hook, "unhook": cmd_unhook, "up": cmd_up, "down": cmd_down, "status": cmd_status,
+            "open": cmd_open, "setup": cmd_setup,
         }[args.cmd](args, command)
     except LLMError as exc:
         termui.error(str(exc))
@@ -263,15 +309,28 @@ def cmd_show(args, _command) -> int:
 def cmd_run(args, command: list[str]) -> int:
     from .runner import install_sigterm_handler, run_command
 
-    if not command:
-        termui.error("give the command to run after `--`, e.g.  visualagents run ./my-crew -- python main.py")
-        return 2
+    from . import detect
+
     project = (args.project or Path.cwd()).resolve()
     if not project.is_dir():
         termui.error(f"{project} is not a folder")
         return 2
-    if command[0].endswith(".py") and not shutil.which(command[0]) and (project / command[0]).exists():
-        command = [shutil.which("python3") or shutil.which("python") or sys.executable, *command]
+    cwd = args.cwd.resolve() if args.cwd else project
+    if command:
+        if command[0].endswith(".py") and not shutil.which(command[0]) and (cwd / command[0]).exists():
+            command = [shutil.which("python3") or shutil.which("python") or sys.executable, *command]
+    else:
+        cand = None if args.pick else detect.load_saved(project)
+        if cand is None:
+            cand = _choose_start_command(project)
+            if cand is None:
+                return 2
+            saved = detect.save_choice(project, cand)
+            termui.info(f"Saved to {saved.relative_to(project)} - next time just run: visualagents run {args.project or '.'}")
+        command, notes = detect.resolve(project, cand)
+        cwd = (project / cand.cwd).resolve() if not args.cwd else cwd
+        for note in notes:
+            termui.info(note)
     bp = _project_blueprint(project, args)
     hub = Hub(bp, record_dir=_record_dir(project, args),
               meta={"mode": "run", "project": str(project), "command": " ".join(command)})
@@ -293,7 +352,15 @@ def cmd_run(args, command: list[str]) -> int:
             narrator = Narrator(hub, provider=provider, model=model, interval=args.interval).start()
 
     install_sigterm_handler()
-    code = run_command(command, hub, cwd=(args.cwd or project).resolve(), server_url=server.url,
+    stop_logs = threading.Event()
+    if not args.no_follow_logs:
+        import time
+
+        from .runner import follow_new_logs
+
+        threading.Thread(target=follow_new_logs, args=(project, hub), daemon=True,
+                         kwargs={"since": time.time() - 1, "stop": stop_logs}).start()
+    code = run_command(command, hub, cwd=cwd, server_url=server.url,
                        instrument=not args.no_instrument, use_pty=False if args.no_pty else None)
     if narrator:
         narrator.stop.set()
@@ -302,9 +369,34 @@ def cmd_run(args, command: list[str]) -> int:
         termui.info(f"Recorded to {hub.record_path}  (replay: visualagents replay {hub.record_path})")
     if not args.exit:
         status = "finished" if code == 0 else f"exited with code {code}"
-        _hold(server, f"Run {status}.")
+        _hold(server, f"Run {status}. Anything it left running in the background keeps reporting here.")
+    stop_logs.set()
     server.stop()
     return code
+
+
+def _choose_start_command(project: Path, force_menu: bool = False):
+    from . import detect, tui
+
+    cands = detect.detect(project)
+    if not cands and not force_menu:
+        termui.error(f"Couldn't work out how to start {project.name}. Give the command once and it is remembered:\n"
+                     f"    visualagents run {project} -- python main.py")
+        return None
+    if not tui.interactive() and not force_menu:
+        termui.info(f"Starting with: {cands[0].label()}  ({cands[0].source})  - use --pick to choose another")
+        return cands[0]
+    tui.heading("▶", f"How should {project.name} start?")
+    shown = cands[:9]
+    options = [(c.label(), c.source) for c in shown] + [("Type a command…", "")]
+    idx = tui.select("", options)
+    if idx < len(shown):
+        return shown[idx]
+    import shlex
+
+    text = tui.ask("Command")
+    where = tui.ask("Run it in which subfolder", ".")
+    return detect.Candidate(shlex.split(text), where, "typed") if text else None
 
 
 def cmd_pipe(args, _command) -> int:
@@ -390,6 +482,217 @@ def cmd_models(args, _command) -> int:
 {termui.bold('See what you can use')} visualagents models --provider google
 """)
     return 0
+
+
+def _daemon_url(info: dict, project_id: str | None = None) -> str:
+    return info["url"] + (f"/?project={project_id}" if project_id else "")
+
+
+def _ensure_daemon(port: int) -> dict:
+    """Background dashboard info, starting it if needed."""
+    import subprocess
+    import time
+
+    from . import home
+
+    info = home.read_daemon()
+    if info:
+        return info
+    log = home.home() / "daemon.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as fh:
+        subprocess.Popen([sys.executable, "-m", "visualagents", "up", "--foreground", "--no-browser", "--port", str(port)],
+                         stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(50):
+        time.sleep(0.1)
+        info = home.read_daemon()
+        if info:
+            return info
+    raise SystemExit(termui.error(f"the background dashboard didn't start - see {log}") or 1)
+
+
+def cmd_up(args, _command) -> int:
+    from . import home
+    from .projects import Projects
+
+    info = home.read_daemon()
+    if info and not args.foreground:
+        termui.info(f"Dashboard already running at {info['url']}")
+    elif not args.foreground:
+        info = _ensure_daemon(args.port)
+        termui.info(f"Dashboard running in the background at {info['url']}  (stop: visualagents down)")
+    else:
+        if info:
+            termui.error(f"a dashboard is already running at {info['url']} (pid {info['pid']})")
+            return 1
+        from .runner import install_sigterm_handler
+
+        projects = Projects(daemon=True)
+        for pid, meta in home.registry().items():
+            if Path(meta.get("path", "")).is_dir():
+                try:
+                    projects.open(Path(meta["path"]))
+                except Exception as exc:  # a broken project must not take the daemon down
+                    termui.error(f"skipping {meta['path']}: {exc}")
+        server = Server(projects, host=args.host, port=args.port).start()
+        home.write_daemon(server.url, projects.token, os.getpid())
+        termui.info(f"Dashboard for hooked projects at {server.url}  (Ctrl+C to stop)")
+        install_sigterm_handler()
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            home.clear_daemon(os.getpid())
+            server.stop()
+        return 0
+    if not args.no_browser and not os.environ.get("VISUALAGENTS_NO_BROWSER"):
+        webbrowser.open(info["url"])
+    return 0
+
+
+def cmd_down(args, _command) -> int:
+    import signal
+    import time
+
+    from . import home
+
+    info = home.read_daemon()
+    if not info:
+        termui.info("No background dashboard is running.")
+        return 0
+    os.kill(int(info["pid"]), signal.SIGTERM)
+    for _ in range(30):
+        time.sleep(0.1)
+        if not home.read_daemon():
+            break
+    home.clear_daemon(int(info["pid"]))
+    termui.info("Stopped the background dashboard.")
+    return 0
+
+
+def cmd_status(args, _command) -> int:
+    from . import home, hooks
+
+    info = home.read_daemon()
+    print(f"\n{termui.bold('Dashboard')}  " + (termui.good(f"running at {info['url']}") if info
+                                                else termui.dim("not running  (visualagents up)")))
+    projects = home.registry()
+    print(f"\n{termui.bold('Hooked projects')} ({len(projects)})")
+    for pid, meta in projects.items():
+        print(f"  {termui.accent('●')} {termui.bold(pid)}  {meta.get('path')}")
+        for site in meta.get("envs", []):
+            ok = hooks.hooked_project(Path(site)) is not None
+            print(f"      {termui.good('hooked') if ok else termui.bad('missing')}  {site}")
+    if not projects:
+        print(termui.dim("  none yet - visualagents hook <folder>"))
+    print()
+    return 0
+
+
+def cmd_hook(args, _command) -> int:
+    from . import detect, home, hooks
+
+    project = args.project.resolve()
+    if not project.is_dir():
+        termui.error(f"{project} is not a folder")
+        return 2
+    pythons = [detect.venv_bin(v, "python") for v in detect.find_venvs(project)] + [p.expanduser() for p in args.python]
+    pythons = [p for p in pythons if p.exists()]
+    if not pythons:
+        termui.error(f"No virtualenv found in {project}.\n"
+                     f"  Create one:      python3 -m venv {project}/.venv && {project}/.venv/bin/pip install -r requirements.txt\n"
+                     f"  or name another:  visualagents hook {args.project} --python /path/to/env/bin/python\n"
+                     f"  or skip hooking:  visualagents run {args.project}")
+        return 2
+    projects = home.registry()
+    pid = home.project_id(project, projects)
+    envs = []
+    for py in pythons:
+        try:
+            target = hooks.install(py, project)
+        except Exception as exc:
+            termui.error(f"could not hook {py}: {exc}")
+            continue
+        envs.append(str(target.parent))
+        termui.info(f"Hooked {py}  ->  {target}")
+    if not envs:
+        return 1
+    projects[pid] = {"path": str(project), "envs": sorted(set(envs) | set(projects.get(pid, {}).get("envs", [])))}
+    home.save_registry(projects)
+    if not args.no_scan and not bpmod.blueprint_path(project).exists():
+        try:
+            bpmod.save(_scan(project, args), bpmod.blueprint_path(project))
+        except LLMError as exc:
+            termui.error(f"scan failed ({exc}); the dashboard will use a quick static map")
+    url = None
+    if not args.no_daemon:
+        info = _ensure_daemon(args.port)
+        url = _daemon_url(info, pid)
+        _notify_daemon(info, project)
+    example = detect.load_saved(project) or next(iter(detect.detect(project)), None)
+    print(f"""
+{termui.good('✔')} {termui.bold(project.name)} is hooked. Start it however you normally do{' - for example:' if example else '.'}
+{('    ' + example.label()) if example else ''}
+  Every Python process from {'its virtualenv' if len(envs) == 1 else 'its virtualenvs'} appears on the dashboard once it calls an LLM.
+  Dashboard: {url or 'visualagents up'}    Undo: visualagents unhook {args.project}
+""", file=sys.stderr)
+    if url and not args.no_browser and not os.environ.get("VISUALAGENTS_NO_BROWSER"):
+        webbrowser.open(url)
+    return 0
+
+
+def _notify_daemon(info: dict, project: Path) -> None:
+    """Let a running dashboard know about a newly hooked project right away."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(info["url"] + "/api/ingest", method="POST",
+                                 data=json.dumps([{"type": "hello", "project": str(project)}]).encode(),
+                                 headers={"Content-Type": "application/json", "X-VisualAgents-Token": info["token"]})
+    try:
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5).read()
+    except Exception:
+        pass
+
+
+def cmd_unhook(args, _command) -> int:
+    from . import detect, home, hooks
+
+    project = args.project.resolve()
+    projects = home.registry()
+    pid = home.project_id(project, projects)
+    sites = set(projects.get(pid, {}).get("envs", []))
+    for v in detect.find_venvs(project):
+        try:
+            sites.add(str(hooks.site_packages(detect.venv_bin(v, "python"))))
+        except Exception:
+            pass
+    removed = [s for s in sites if hooks.uninstall(Path(s))]
+    projects.pop(pid, None)
+    home.save_registry(projects)
+    for s in removed:
+        termui.info(f"Removed hook from {s}")
+    if not removed:
+        termui.info(f"{project.name} had no hooks installed.")
+    return 0
+
+
+def cmd_open(args, _command) -> int:
+    from . import home
+
+    project = args.project.resolve()
+    info = _ensure_daemon(DAEMON_PORT)
+    url = _daemon_url(info, home.project_id(project))
+    termui.info(f"Dashboard: {url}")
+    webbrowser.open(url)
+    return 0
+
+
+def cmd_setup(args, _command) -> int:
+    from . import wizard
+
+    return wizard.run(args)
 
 
 def cmd_demo(args, _command) -> int:

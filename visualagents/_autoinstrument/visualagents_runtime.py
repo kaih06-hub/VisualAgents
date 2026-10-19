@@ -9,9 +9,10 @@ code changes. You can also emit events yourself:
         emit("thought", "researcher", "Looking for 2024 benchmarks")
         emit("tool_start", "researcher", "solid-state batteries", tool="web_search")
 
-Events are written to stderr as `@@visualagents {json}` lines, which `visualagents run/pipe/watch` parse
-(and hide from the terminal). Set VISUALAGENTS_URL (and VISUALAGENTS_TOKEN) to POST them to a running
-dashboard instead, e.g. from a process whose output VisualAgents does not see.
+Events travel in-band as `@@visualagents {json}` lines on stderr when stderr is the pipe VisualAgents is
+reading (ordered exactly with printed output, hidden from the terminal). When it isn't - a start script sent
+the app to the background or redirected its logs, or the app runs on its own under `visualagents hook` -
+they are POSTed to the dashboard (VISUALAGENTS_URL / VISUALAGENTS_TOKEN, or the hook's daemon settings).
 """
 
 from __future__ import annotations
@@ -36,8 +37,69 @@ _queue = None
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never route localhost via a proxy
 
 
+_config = {}  # set by configure(): url, token, project (hook mode)
+_channel = {}  # pid -> True when events go in-band on stderr
+_down_until = 0.0
+
+
+def configure(url=None, token=None, project=None, daemon_file=None, lazy=False):
+    """Send events to a dashboard over HTTP (used by `visualagents hook`).
+
+    lazy: stay silent until the process does something agent-like (an LLM call or a framework event),
+    so pip / pytest / language servers running in the same virtualenv never show up on the dashboard.
+    """
+    _config.update({k: v for k, v in (("url", url), ("token", token), ("project", project),
+                                      ("daemon_file", daemon_file)) if v})
+    _config["http"] = True
+    _config["lazy"] = bool(lazy)
+    _config.setdefault("armed", not lazy)
+    _channel.clear()
+
+
 def _url():
-    return os.environ.get("VISUALAGENTS_URL")
+    url = _config.get("url") or os.environ.get("VISUALAGENTS_URL")
+    if not url and _config.get("daemon_file"):
+        _reload_daemon()
+        url = _config.get("url")
+    return url
+
+
+def _reload_daemon():
+    """The dashboard may start after this process: look for it again every few seconds."""
+    now = time.time()
+    if now - _config.get("daemon_checked", 0) < 5:
+        return
+    _config["daemon_checked"] = now
+    try:
+        with open(_config["daemon_file"], encoding="utf-8") as fh:
+            info = json.load(fh)
+        _config["url"], _config["token"] = info.get("url"), info.get("token")
+    except Exception:
+        pass
+
+
+def _token():
+    return _config.get("token") or os.environ.get("VISUALAGENTS_TOKEN", "")
+
+
+def _in_band():
+    """True when fd 2 is the very pipe/pty VisualAgents reads, so markers stay ordered with output."""
+    pid = os.getpid()
+    if pid not in _channel:
+        if _config.get("http"):
+            ok = False
+        elif os.environ.get("VISUALAGENTS_STREAM_ID"):
+            try:
+                st = os.fstat(2)
+                ok = "%d:%d" % (st.st_dev, st.st_ino) == os.environ["VISUALAGENTS_STREAM_ID"]
+            except OSError:
+                ok = False
+        elif os.environ.get("VISUALAGENTS_CHANNEL") == "stderr":
+            ok = True
+        else:
+            ok = not _url()
+        _channel[pid] = ok
+    return _channel[pid]
 
 
 def _text(value, limit=4000):
@@ -67,8 +129,16 @@ def emit(type, agent=None, text=None, **data):
     for k, v in data.items():
         if v is not None:
             payload[k] = v if isinstance(v, (bool, int, float)) else _text(v, 1000)
-    if _url() and os.environ.get("VISUALAGENTS_CHANNEL") != "stderr":
-        _enqueue(payload)
+    if not _in_band():
+        if _config.get("project"):
+            payload["project"] = _config["project"]
+        if not _config.get("armed", True):
+            if type == "line":
+                _pending.append(payload)  # remember recent output in case this process turns out to matter
+                return
+            _arm()
+        if _url():
+            _enqueue(payload)
         return
     line = MARKER + json.dumps(payload, ensure_ascii=False, default=str) + "\n"
     try:
@@ -80,6 +150,29 @@ def emit(type, agent=None, text=None, **data):
             sys.stderr.flush()
         except Exception:
             pass
+
+
+_pending = __import__("collections").deque(maxlen=300)
+
+
+def _arm():
+    """First agent-like event in a lazily hooked process: announce it, then replay its recent output."""
+    _config["armed"] = True
+    hello = {"type": "process_start", "ts": time.time(), "pid": os.getpid(),
+             "text": " ".join(sys.argv) or sys.executable, "cwd": os.getcwd()}
+    if _config.get("project"):
+        hello["project"] = _config["project"]
+    if _url():
+        _enqueue(hello)
+        for item in list(_pending):
+            _enqueue(item)
+    _pending.clear()
+    atexit.register(_goodbye)
+
+
+def _goodbye():
+    emit("process_end", None, None, pid=os.getpid(), code=0)
+    flush()
 
 
 def _enqueue(payload):
@@ -105,19 +198,20 @@ def _sender(q):
 
 
 def _post(batch):
+    global _down_until
     url = _url()
-    if not url:
-        return
+    if not url or time.time() < _down_until:
+        return  # no dashboard listening right now: drop rather than slow the app down
     req = urllib.request.Request(
         url.rstrip("/") + "/api/ingest",
         data=json.dumps(batch, ensure_ascii=False, default=str).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-VisualAgents-Token": os.environ.get("VISUALAGENTS_TOKEN", "")},
+        headers={"Content-Type": "application/json", "X-VisualAgents-Token": _token()},
         method="POST",
     )
     try:
         _opener.open(req, timeout=3).read()
     except Exception:
-        pass
+        _down_until = time.time() + 3.0
 
 
 def flush(timeout=3.0):
@@ -134,8 +228,51 @@ if hasattr(os, "register_at_fork"):
     def _after_fork():
         global _queue
         _queue = None
+        _channel.clear()
+        if _config.get("lazy"):
+            _config["armed"] = False  # a forked worker announces itself when it does agent work
+            _pending.clear()
 
     os.register_at_fork(after_in_child=_after_fork)
+
+
+# -- output capture (hook mode: the dashboard can't read this process's terminal) ----------
+
+class _Tee:
+    """Writes through to the real stream and forwards complete lines to the dashboard."""
+
+    def __init__(self, stream, name):
+        self._stream = stream
+        self._name = name
+        self._buf = ""
+        self._busy = False
+
+    def write(self, s):
+        n = self._stream.write(s)
+        if isinstance(s, str) and s and not self._busy:
+            self._busy = True
+            try:
+                self._buf += s
+                if "\n" in self._buf:
+                    *lines, self._buf = self._buf.split("\n")
+                    for line in lines:
+                        if line.strip() and MARKER.strip() not in line:
+                            emit("line", None, line, stream=self._name)
+                if len(self._buf) > 8000:
+                    self._buf = ""
+            finally:
+                self._busy = False
+        return n
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def capture_output():
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is not None and not isinstance(stream, _Tee):
+            setattr(sys, name, _Tee(stream, name))
 
 
 # -- convenience API --------------------------------------------------------

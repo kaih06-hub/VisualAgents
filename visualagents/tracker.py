@@ -196,8 +196,7 @@ class Tracker:
         line = clean(raw)
         if not line.strip():
             return []
-        if self.run["status"] == "idle":
-            self.run.update(status="running", started=self.clock())
+        self._wake()
         out: list[dict[str, Any]] = []
         text = strip_symbols(line.strip())
         kind = "log"
@@ -262,8 +261,10 @@ class Tracker:
     def ingest_structured(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         """Precise events from the SDK / auto-instrumentation (see visualagents_runtime)."""
         typ = str(p.get("type") or p.get("event") or "log")
-        if self.run["status"] == "idle":
-            self.run.update(status="running", started=self.clock())
+        if typ == "line":
+            return self.ingest_line(str(p.get("text") or ""), str(p.get("stream") or "stdout"))
+        if typ not in ("run_start", "run_end"):
+            self._wake()
         soft = bool(p.get("soft") or p.get("hint"))  # hint: agent name guessed from the call stack
         name = p.get("agent")
         aid = self._lookup(name, create=not soft) if name else None
@@ -346,6 +347,13 @@ class Tracker:
         return out
 
     # -- internals ---------------------------------------------------------
+    def _wake(self) -> None:
+        """Activity means the run is live - including processes a finished start script left running."""
+        if self.run["status"] == "idle":
+            self.run.update(status="running", started=self.clock())
+        elif self.run["status"] in ("finished", "failed"):
+            self.run.update(status="running", ended=None, exit_code=None)
+
     def _rebase_for_precise(self) -> None:
         """Instrumented events just started: drop whatever the log heuristics guessed before them."""
         for st in self.agents.values():

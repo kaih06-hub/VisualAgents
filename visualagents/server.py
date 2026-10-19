@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .hub import Hub
+from .projects import Projects
 
 _TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
           ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"}
@@ -27,7 +28,7 @@ def _asset(name: str) -> bytes | None:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    hub: Hub
+    projects: Projects
     server_version = "VisualAgents"
     protocol_version = "HTTP/1.1"
 
@@ -49,6 +50,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj: Any, status: int = 200) -> None:
         self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _hub(self, url) -> Hub:
+        return self.projects.resolve(parse_qs(url.query).get("project", [None])[0])
 
     def _same_origin(self) -> bool:
         origin = self.headers.get("Origin")
@@ -73,9 +77,14 @@ class _Handler(BaseHTTPRequestHandler):
                 ext = name[name.rfind("."):]
                 self._send(200, body, _TYPES.get(ext, "application/octet-stream"))
         elif path == "/api/state":
-            self._json(self.hub.snapshot())
+            hub = self._hub(url)
+            snap = hub.snapshot()
+            snap["meta"]["daemon"] = self.projects.daemon
+            self._json(snap)
+        elif path == "/api/projects":
+            self._json({"daemon": self.projects.daemon, "projects": self.projects.listing()})
         elif path == "/api/blueprint":
-            self._json(self.hub.blueprint)
+            self._json(self._hub(url).blueprint)
         elif path == "/api/stream":
             self._stream(url)
         elif path == "/favicon.ico":
@@ -88,7 +97,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(min(length, 8_000_000)) if length else b""
         if path == "/api/ingest":
-            if self.headers.get("X-VisualAgents-Token") != self.hub.token:
+            if self.headers.get("X-VisualAgents-Token") != self.projects.token:
                 self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
                 return
             try:
@@ -100,16 +109,19 @@ class _Handler(BaseHTTPRequestHandler):
             for item in items:
                 if not isinstance(item, dict):
                     continue
+                hub = self.projects.for_item(item)
+                if item.get("type") == "hello":  # a project was just hooked: the hub now exists
+                    continue
                 if item.get("type") == "line":
-                    self.hub.feed_line(str(item.get("text", "")), str(item.get("stream", "stdout")))
+                    hub.feed_line(str(item.get("text", "")), str(item.get("stream", "stdout")))
                 else:
-                    self.hub.feed_structured(item)
+                    hub.feed_structured(item)
             self._json({"ok": True, "count": len(items)})
         elif path == "/api/reset":
             if not self._same_origin():
                 self._json({"error": "cross-origin"}, HTTPStatus.FORBIDDEN)
                 return
-            self.hub.reset_view()
+            self._hub(urlparse(self.path)).reset_view()
             self._json({"ok": True})
         else:
             self._send(404, b"not found", "text/plain")
@@ -128,10 +140,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         version = -1
+        hub = self._hub(url)
         try:
             self.wfile.write(b"retry: 1500\n\n")
             while True:
-                events, state, version = self.hub.wait(last_seq, version, timeout=15.0)
+                events, state, version = hub.wait(last_seq, version, timeout=15.0)
                 chunks = []
                 for ev in events:
                     last_seq = ev["seq"]
@@ -147,8 +160,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class Server:
-    def __init__(self, hub: Hub, host: str = "127.0.0.1", port: int = 7420):
-        handler = type("Handler", (_Handler,), {"hub": hub})
+    def __init__(self, target: Hub | Projects, host: str = "127.0.0.1", port: int = 7420):
+        self.projects = target if isinstance(target, Projects) else Projects.single(target)
+        handler = type("Handler", (_Handler,), {"projects": self.projects})
         self.httpd = _bind(host, port, handler)
         self.httpd.daemon_threads = True
         self.host, self.port = self.httpd.server_address[:2]

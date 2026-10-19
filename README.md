@@ -43,27 +43,70 @@ or `uv tool install git+https://github.com/kaih06-hub/VisualAgents.git`, or `pip
 Claude support is built in. For Gemini or OpenAI (incl. Ollama / LM Studio), install the extra:
 `pipx install "visualagents[google] @ git+https://github.com/kaih06-hub/VisualAgents.git"` (`[openai]`, or `[all]`).
 
-## Try it in 10 seconds (no API key)
+## Start here
 
 ```bash
-visualagents demo
+visualagents
 ```
 
-A simulated four-agent research crew (planner → researcher → writer ⇄ critic) runs in your terminal while the
-dashboard maps it live.
+Three questions, then your agents' map pops up:
+
+1. **Which project?** — a recent one, the current folder, any path (Tab completes), or a GitHub URL (cloned for you).
+2. **Which LLM draws the map?** — Gemini, Claude, OpenAI, a local / OpenAI-compatible server (Ollama, LM Studio,
+   vLLM), or offline. Then pick a model (best / cheaper / cheapest, or any id).
+3. **API key** — pasted hidden, checked with a free model-list call, and (if you say so) saved to
+   `~/.visualagents/keys.json`, readable only by you. Next time you just press Enter through the defaults.
+
+VisualAgents then maps the agents, opens the dashboard with the blueprint popup, and offers to **start the project
+now**, **hook it** so it appears whenever you run it yourself, or just show the map.
+
+No API key? `visualagents demo` runs a simulated four-agent crew in 10 seconds.
 
 ## Use it on your own agents
 
-```bash
-# 1. Map the agents in a project (uses Claude if ANTHROPIC_API_KEY is set, otherwise offline static analysis)
-visualagents scan ./my-agent-app
+Two ways, depending on how much you want to change your routine.
 
-# 2. Run your agent through VisualAgents - everything after `--` is your normal command
-visualagents run ./my-agent-app -- python main.py "What changed in EV batteries this year?"
+### 1. `visualagents run <folder>` — start it through VisualAgents
+
+```bash
+visualagents run ~/projects/some-agent
 ```
 
-`run` opens the dashboard, passes your terminal through untouched (prompts like `input("Query: ")` still work),
-and keeps the dashboard open after the run so you can inspect it. Other ways to feed it:
+The first time, VisualAgents works out how the project starts — commands in the README, `start.sh`-style
+scripts, FastAPI / Gradio / Streamlit / Chainlit apps, `__main__` scripts, `pyproject` scripts, `package.json`,
+the Makefile — asks you to pick, and remembers the answer in `.visualagents/config.json`. It runs `python`,
+`uvicorn`, `streamlit`… from the project's own virtualenv (or `uv run` / `poetry run`), maps the agents if there is
+no blueprint yet, and opens the dashboard. Start scripts that push the app into the background or redirect its
+output to a log file still work: events reach the dashboard over HTTP, and log files the app writes are followed.
+
+```bash
+visualagents run ~/projects/some-agent --pick                 # choose the start command again
+visualagents run ~/projects/some-agent -- python main.py "q"  # or give an exact command
+```
+
+### 2. `visualagents hook <folder>` — hook once, then run it however you like
+
+```bash
+visualagents hook ~/projects/some-agent     # once
+cd ~/projects/some-agent && ./start.sh      # ...or your IDE, a notebook, `uv run`, cron - anything
+```
+
+`hook` installs a one-line startup file (`visualagents_hook.pth`) into the folder's virtualenv(s) and starts a
+background dashboard at http://127.0.0.1:7400. From then on every Python process from that environment shows
+up live as soon as it calls an LLM — no wrapper command. Processes that never do (pip, pytest, your editor's
+tools) stay invisible. One dashboard follows all your hooked projects, with a switcher at the top.
+
+```bash
+visualagents status                 # dashboard + hooked projects
+visualagents open ~/projects/x      # open a project's dashboard
+visualagents unhook ~/projects/x    # remove the hook
+visualagents up / down              # start / stop the background dashboard
+visualagents hook . --python ~/miniconda3/envs/agents/bin/python   # conda or any other interpreter
+```
+
+The hook needs the project's virtualenv to exist, so run the project once (or create the venv) first.
+
+### Other inputs
 
 ```bash
 python main.py 2>&1 | visualagents pipe ./my-agent-app      # output you already produce
@@ -73,8 +116,8 @@ visualagents show ./my-agent-app                              # just the bluepri
 visualagents blueprint ./my-agent-app                         # print the blueprint in the terminal
 ```
 
-Every `run`/`pipe`/`watch` is recorded under `.visualagents/runs/` and can be replayed later — even against an
-improved blueprint (`replay … --project ./my-agent-app`).
+Every run is recorded under `.visualagents/runs/` and can be replayed later — even against an improved
+blueprint (`replay … --project ./my-agent-app`).
 
 ## How it attributes work to agents
 
@@ -82,7 +125,7 @@ VisualAgents combines three sources, from most to least precise:
 
 | Source | When | What you get |
 |---|---|---|
-| **Auto-instrumentation** | `visualagents run` with a Python app using LangChain / LangGraph, the OpenAI Agents SDK, or the **OpenAI SDK directly** (`chat.completions.create` — sync, async, streaming, any OpenAI-compatible endpoint) | Exact agent boundaries, LLM replies as thoughts, every tool call and tool result — no code changes. Raw SDK calls are credited to the class or function that made them (e.g. `Programmer`, `Inspector`). Injected via `PYTHONPATH`; disable with `--no-instrument`. |
+| **Auto-instrumentation** | `visualagents run` or `hook` with a Python app using LangChain / LangGraph, the OpenAI Agents SDK, or the **OpenAI SDK directly** (`chat.completions.create` — sync, async, streaming, any OpenAI-compatible endpoint) | Exact agent boundaries, LLM replies as thoughts, every tool call and tool result — no code changes. Raw SDK calls are credited to the class or function that made them (e.g. `Programmer`, `Inspector`). Injected via `PYTHONPATH`; disable with `--no-instrument`. |
 | **Console patterns** | Always | Recognises CrewAI (`# Agent: …`, rich panels), AutoGen (`coder (to critic):`, `---------- coder ----------`), LangGraph stream output (`Update from node …`, `{'node': …}`), ReAct (`Thought:` / `Action:` / `Observation:` / `Final Answer:`), handoff phrases (`Handing off to Writer`, `transfer_to_billing`), `[Agent] …` prefixes, and tool names owned by a single agent. |
 | **LLM narration** (`--smart`) | Optional | Every few seconds an LLM reads the latest output and says which agent is working and summarises what it's doing in one line. |
 
@@ -117,28 +160,21 @@ app's environment: `from visualagents_runtime import agent, emit`. Marker lines 
 For LangChain without `run`, pass `visualagents.langchain_handler()` in `callbacks=[…]`; for the OpenAI Agents
 SDK, `agents.add_trace_processor(visualagents.openai_agents_processor())`.
 
-### Example: a web-app agent (LAMBDA)
+### Example: LAMBDA (a data-science agent)
 
-[LAMBDA](https://github.com/AMA-CMFAI/LAMBDA) (a data-science agent) runs as a FastAPI backend plus a React UI, and
-calls the OpenAI SDK directly. Its `start.sh` sends the backend to the background, so run the backend through
-VisualAgents instead and start the UI separately:
+[LAMBDA](https://github.com/AMA-CMFAI/LAMBDA) is a FastAPI backend plus a React UI that calls the OpenAI SDK
+directly, and its `start.sh` sends both to the background:
 
 ```bash
 git clone https://github.com/AMA-CMFAI/LAMBDA.git ~/LAMBDA
-cd ~/LAMBDA/backend && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-cp .env.example .env                                   # set OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_LIST
-visualagents scan ~/LAMBDA
-visualagents run ~/LAMBDA --cwd ~/LAMBDA/backend -- ./venv/bin/python -m uvicorn main:app --port 8000
-# second terminal: LAMBDA's own UI
-cd ~/LAMBDA/frontend && npm install && VITE_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev -- --port 3000
+cp ~/LAMBDA/backend/.env.example ~/LAMBDA/backend/.env    # add OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_LIST
+visualagents run ~/LAMBDA                                  # pick ./start.sh the first time
 ```
 
-Ask LAMBDA something at http://localhost:3000 and watch it at http://127.0.0.1:7420. The current LAMBDA is one
-agent with tools (Python, shell, files, a to-do list), so the map shows its reasoning, each tool call and result,
-and the turns on the time ruler. The paper's two-agent design — a Programmer that writes code and an Inspector that
-debugs it — is on the `legacy-open-source` branch (`git clone -b legacy-open-source …`, configure `config.yaml`,
-then `visualagents run ~/LAMBDA-v1 -- ./venv/bin/python lambda_app.py`), where the map shows the two agents
-handing work back and forth.
+Ask LAMBDA something at http://localhost:3000 and watch it at http://127.0.0.1:7420. Or, after LAMBDA has run
+once (so `backend/venv` exists), `visualagents hook ~/LAMBDA` and keep using `./start.sh` as usual. The current
+LAMBDA is one agent with tools (Python, shell, files, a to-do list); the paper's Programmer ⇄ Inspector design is
+on the `legacy-open-source` branch, where the map shows the two agents handing work back and forth.
 
 ## The blueprint
 
@@ -204,10 +240,13 @@ The server binds to `127.0.0.1` only. Ingest requests need a per-run token.
 ## CLI reference
 
 ```
+visualagents          guided start (same as `visualagents setup`)
 visualagents demo     [--speed N]
+visualagents run      [FOLDER] [--pick] [--smart] [--cwd DIR] [--no-instrument] [--no-follow-logs] [-- COMMAND…]
+visualagents hook     [FOLDER] [--python PY]…  /  unhook [FOLDER]  /  open [FOLDER]
+visualagents up       [--port 7400] [--foreground]  /  down  /  status
 visualagents models   [PROJECT] [--provider anthropic|openai|google]
 visualagents scan     [PROJECT] [--static | --llm] [--provider auto|anthropic|openai|google] [--model M] [--max-chars N] [--json] [-o FILE]
-visualagents run      [PROJECT] [--smart] [--provider P] [--model M] [--narrate-model M] [--cwd DIR] [--no-instrument] [--no-pty] [--no-record] -- COMMAND…
 visualagents pipe     [PROJECT] [--quiet]
 visualagents watch    [PROJECT] --log FILE [--from-start] [--echo]
 visualagents replay   RECORDING [--project DIR] [--speed N] [--instant]
