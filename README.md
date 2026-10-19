@@ -165,9 +165,14 @@ are redacted.
 
 - **Graph** — agents laid out by workflow order (left→right, or top→bottom on narrow screens); the active agent
   glows with a thought bubble showing what it's doing; handoffs animate along the edges with traversal counts.
+  **Drag any block** to rearrange the map — the arrows follow, and positions are remembered per project
+  (the layout button in the corner restores the automatic layout).
 - **Steps** — the blueprint's phases, checked off as the run moves through them.
 - **Live chain of thought** — every thought, tool call, result and answer, colour-coded by agent and filterable.
-- **Path taken** — the exact sequence of agents with time spent in each, including loops.
+  Hover any line and the agent that produced it lights up and bounces on the map (handoffs light up the arrow).
+- **Time ruler** — every agent's turn laid out on a timeline with the workflow steps above it. Drag the playhead
+  back to any moment and the whole dashboard rewinds: who was working, which step, what it was thinking, and the
+  chain of thought up to that second. Press ▶ (or Space) to replay at 1–16×, and **Live** (or `L`) to return.
 - **Blueprint popup** (`B`) — summary, steps, agents with roles/tools/source, and every handoff.
 - Click an agent for its details and its own chain of thought. `F` fits the graph; light/dark/auto theme.
 

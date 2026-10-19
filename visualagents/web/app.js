@@ -40,6 +40,9 @@
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     wait: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     visits: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    play: '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
+    pause: '<rect x="6" y="4.5" width="4" height="15" rx="1" fill="currentColor"/><rect x="14" y="4.5" width="4" height="15" rx="1" fill="currentColor"/>',
+    layout: '<rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M10 7h4a3 3 0 0 1 3 3v4"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
     auto: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/>',
@@ -63,7 +66,8 @@
     filter: null, hideLogs: false, autoScroll: true, lastItem: null,
     modalAuto: false, lastActive: undefined, pendingAnims: [], raf: 0,
     drawerId: null, drawerTimer: 0, narrated: false, wasDisconnected: false, es: null,
-    bubbleText: "",
+    bubbleText: "", moved: {}, shift: { x: 0, y: 0 }, clearedSeq: 0,
+    scrubT: null, hist: null, playing: false, speed: 4, hoverItem: null,
   };
 
   const wrap = $("#canvas-wrap"), canvas = $("#canvas"), edgesSvg = $("#edges"), nodesEl = $("#nodes");
@@ -361,10 +365,130 @@
   }
 
   // ---------------------------------------------------------------- static render (layout changes)
+  // ---------------------------------------------------------------- dragging blocks
+  const posKey = () => `va-pos:${S.bp.project}:${S.layout.orient}`;
+
+  function loadPositions() {
+    let saved = {};
+    try { saved = JSON.parse(store.get(posKey()) || "{}"); } catch { saved = {}; }
+    S.moved = {};
+    for (const id in saved) {
+      const n = S.layout.nodes[id];
+      if (n && Number.isFinite(saved[id].x) && Number.isFinite(saved[id].y)) {
+        n.x = saved[id].x;
+        n.y = saved[id].y;
+        S.moved[id] = saved[id];
+      }
+    }
+    if (!Object.keys(S.moved).length) return;
+    const keys = new Set(S.layout.edges.map((e) => e.key));
+    for (const e of S.layout.edges) {
+      if (S.moved[e.from] || S.moved[e.to]) {
+        e.d = pathFree(S.layout.nodes[e.from], S.layout.nodes[e.to], keys.has(`${e.to}->${e.from}`) ? (e.from < e.to ? -9 : 9) : 0);
+        e.labelPos = undefined;
+      }
+    }
+  }
+
+  function savePositions() {
+    store.set(posKey(), JSON.stringify(S.moved));
+  }
+
+  // Route an edge between two freely placed blocks: leave and enter on the sides that face each other.
+  function pathFree(a, b, offset) {
+    const ax = a.x + a.w / 2, ay = a.y + a.h / 2, bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const dx = bx - ax, dy = by - ay;
+    if (Math.abs(dx) - (a.w + b.w) / 2 >= Math.abs(dy) - (a.h + b.h) / 2) {
+      const sx = Math.sign(dx) || 1;
+      const x1 = ax + (sx * a.w) / 2, x2 = bx - (sx * b.w) / 2, y1 = ay + offset, y2 = by + offset;
+      const c = Math.max(30, Math.abs(x2 - x1) / 2) * sx;
+      return `M${x1},${y1} C${x1 + c},${y1} ${x2 - c},${y2} ${x2},${y2}`;
+    }
+    const sy = Math.sign(dy) || 1;
+    const y1 = ay + (sy * a.h) / 2, y2 = by - (sy * b.h) / 2, x1 = ax + offset, x2 = bx + offset;
+    const c = Math.max(30, Math.abs(y2 - y1) / 2) * sy;
+    return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`;
+  }
+
+  function placeLabel(ref) {
+    try {
+      const len = ref.path.getTotalLength();
+      ref.mid = ref.path.getPointAtLength(len / 2);
+    } catch { return; }
+    const pos = ref.edge.labelPos;
+    ref.label.setAttribute("x", ref.mid.x + (pos === "left" ? -10 : pos === "right" ? 10 : 0));
+    ref.label.setAttribute("y", ref.mid.y + (pos === "below" ? 17 : pos === "left" || pos === "right" ? 4 : -7));
+    ref.label.setAttribute("text-anchor", pos === "left" ? "end" : pos === "right" ? "start" : "middle");
+  }
+
+  function reroute(id) {
+    for (const key in S.edgeEls) {
+      const ref = S.edgeEls[key];
+      const e = ref.edge;
+      if (e.from !== id && e.to !== id) continue;
+      const pair = !!S.edgeEls[`${e.to}->${e.from}`];
+      e.d = pathFree(S.layout.nodes[e.from], S.layout.nodes[e.to], pair ? (e.from < e.to ? -9 : 9) : 0);
+      e.labelPos = undefined;
+      ref.path.setAttribute("d", e.d);
+      placeLabel(ref);
+    }
+  }
+
+  function makeDraggable(elm, id, onClick) {
+    elm.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      const n = S.layout.nodes[id];
+      const start = { x: e.clientX, y: e.clientY, nx: n.x, ny: n.y };
+      let dragging = false;
+      elm.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+        if (!dragging && Math.hypot(dx, dy) < 4) return;
+        if (!dragging) {
+          dragging = true;
+          elm.classList.add("dragging");
+          document.body.classList.add("dragging-node");
+        }
+        n.x = start.nx + dx / S.view.k;
+        n.y = start.ny + dy / S.view.k;
+        elm.style.left = `${n.x}px`;
+        elm.style.top = `${n.y}px`;
+        S.moved[id] = { x: Math.round(n.x), y: Math.round(n.y) };
+        reroute(id);
+        positionBubble(viewSt());
+      };
+      const up = () => {
+        elm.removeEventListener("pointermove", move);
+        elm.removeEventListener("pointerup", up);
+        elm.removeEventListener("pointercancel", up);
+        elm.classList.remove("dragging");
+        document.body.classList.remove("dragging-node");
+        if (dragging) savePositions();
+        else if (onClick) onClick();
+      };
+      elm.addEventListener("pointermove", move);
+      elm.addEventListener("pointerup", up);
+      elm.addEventListener("pointercancel", up);
+    });
+  }
+
+  function resetLayout() {
+    store.set(posKey(), "{}");
+    S.moved = {};
+    renderGraph();
+    updateNodes();
+    updateEdges();
+    S.userMoved = false;
+    fit(true);
+  }
+
   function renderGraph() {
     S.layout = computeLayout();
+    loadPositions();
     const L = S.layout;
     const shiftX = -L.bounds.x, shiftY = -L.bounds.y;
+    S.shift = { x: shiftX, y: shiftY };
     canvas.style.width = `${L.bounds.w}px`;
     canvas.style.height = `${L.bounds.h}px`;
     edgesSvg.setAttribute("width", L.bounds.w);
@@ -391,17 +515,7 @@
     }
     // labels after paths exist
     requestAnimationFrame(() => {
-      for (const key in S.edgeEls) {
-        const ref = S.edgeEls[key];
-        try {
-          const len = ref.path.getTotalLength();
-          ref.mid = ref.path.getPointAtLength(len / 2);
-          const pos = ref.edge.labelPos;
-          ref.label.setAttribute("x", ref.mid.x + (pos === "left" ? -10 : pos === "right" ? 10 : 0));
-          ref.label.setAttribute("y", ref.mid.y + (pos === "below" ? 17 : pos === "left" || pos === "right" ? 4 : -7));
-          ref.label.setAttribute("text-anchor", pos === "left" ? "end" : pos === "right" ? "start" : "middle");
-        } catch { /* path not rendered */ }
-      }
+      for (const key in S.edgeEls) placeLabel(S.edgeEls[key]);
       updateEdges();
     });
 
@@ -413,6 +527,7 @@
       const n = L.nodes[id];
       const t = el("div", `terminal-node ${id === START ? "start" : "end"}`, id === START ? "START" : "END");
       Object.assign(t.style, { left: `${n.x}px`, top: `${n.y}px` });
+      makeDraggable(t, id);
       nodesEl.appendChild(t);
       S.termEls[id] = t;
     }
@@ -434,7 +549,7 @@
       $(".node-name", node).textContent = a.name;
       $(".node-role", node).textContent = a.role || (a.dynamic ? "discovered at runtime" : "");
       node.title = a.description || a.role || a.name;
-      node.addEventListener("click", () => openDrawer(a.id));
+      makeDraggable(node, a.id, () => openDrawer(a.id));
       node.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(a.id); } });
       nodesEl.appendChild(node);
       S.nodeEls[a.id] = node;
@@ -445,6 +560,121 @@
     nodesEl.appendChild(bubble);
     S.bubble = bubble;
     S.bubbleText = "";
+  }
+
+  // ---------------------------------------------------------------- history (time ruler)
+  // The map at any moment is rebuilt from the event log, so the ruler can rewind and replay it.
+  const INFORMATIVE = new Set(["thought", "tool", "output", "task", "narration", "message"]);
+
+  function viewSt() {
+    if (S.scrubT == null) return S.st;
+    if (!S.hist || S.hist.T !== S.scrubT || S.hist.seq !== S.seqMax) {
+      S.hist = { T: S.scrubT, seq: S.seqMax, st: buildHistory(S.scrubT) };
+    }
+    return S.hist.st;
+  }
+
+  const viewNow = () => (S.scrubT == null ? now() : S.scrubT);
+
+  function activityLabel(ev) {
+    if (ev.kind === "tool" && ev.data && ev.data.tool) return `Using ${ev.data.tool}`;
+    return displayText(ev).replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  function buildHistory(T) {
+    const live = S.st;
+    const t0 = live.run.started || 0;
+    const blank = () => ({ status: "idle", activity: "", activity_kind: "", visits: 0, tools: 0, errors: 0, events: 0 });
+    const agents = {};
+    for (const a of S.agents) agents[a.id] = blank();
+    const path = [];
+    const counts = {};
+    let active = null;
+    let step = -1;
+    const marks = [];
+    for (const ev of S.events) {
+      if (ev.ts > T) break;
+      if (ev.ts < t0) continue;
+      if (ev.kind === "handoff" && ev.data && ev.data.to) {
+        const to = ev.data.to, frm = ev.data.frm || START;
+        if (active && agents[active] && agents[active].status === "active") agents[active].status = "done";
+        if (path.length) path[path.length - 1].end = ev.ts;
+        counts[`${frm}->${to}`] = (counts[`${frm}->${to}`] || 0) + 1;
+        const st = (agents[to] = agents[to] || blank());
+        st.status = "active";
+        st.visits++;
+        active = to;
+        path.push({ agent: to, start: ev.ts, end: null, from: frm === START ? null : frm });
+        if (ev.data.step != null && ev.data.step >= 0 && ev.data.step !== step) marks.push({ t: ev.ts, step: ev.data.step });
+        if (ev.data.step != null) step = ev.data.step;
+        continue;
+      }
+      const st = ev.agent && agents[ev.agent];
+      if (!st) continue;
+      st.events++;
+      if (ev.kind === "tool") st.tools++;
+      if (ev.kind === "error") st.errors++;
+      if (INFORMATIVE.has(ev.kind) || (!st.activity && ev.kind === "log")) {
+        st.activity = activityLabel(ev);
+        st.activity_kind = ev.kind;
+      }
+    }
+    const run = { ...live.run };
+    if (live.run.ended && T >= live.run.ended) {
+      if (active) {
+        agents[active].status = live.run.status === "failed" ? "error" : "done";
+        counts[`${active}->${END}`] = (counts[`${active}->${END}`] || 0) + 1;
+        if (path.length) path[path.length - 1].end = live.run.ended;
+        active = null;
+      }
+    } else {
+      Object.assign(run, { status: "running", ended: null, exit_code: null });
+    }
+    return {
+      active, agents, path, path_total: path.length, edge_counts: counts, step_index: step, run, marks,
+      dynamic_edges: live.dynamic_edges, extra_agents: live.extra_agents, precise: live.precise, seq: live.seq,
+    };
+  }
+
+  // ---------------------------------------------------------------- hover: feed -> map
+  function setHover(item) {
+    if (item === S.hoverItem) return;
+    clearHover();
+    if (!item) return;
+    S.hoverItem = item;
+    const { agent, frm, to, ts } = item.dataset;
+    const ids = frm || to ? [frm, to].filter(Boolean) : agent ? [agent] : [];
+    for (const id of ids) {
+      const elm = S.nodeEls[id] || S.termEls[id];
+      if (!elm) continue;
+      elm.classList.add("hl");
+      elm.classList.remove("bounce");
+      void elm.offsetWidth; // restart the bounce
+      elm.classList.add("bounce");
+    }
+    if (frm && to) {
+      const ref = S.edgeEls[`${frm}->${to}`];
+      if (ref) {
+        ref.path.classList.add("hover-hl");
+        animateHandoff({ data: { frm, to } });
+      }
+    }
+    if (item.classList.contains("tl-seg")) item.classList.add("hl");
+    else if (ts) {
+      const seg = findSegment(+ts);
+      if (seg) seg.classList.add("hl");
+    }
+  }
+
+  function clearHover() {
+    S.hoverItem = null;
+    document.querySelectorAll(".node.hl, .terminal-node.hl, .tl-seg.hl").forEach((e) => e.classList.remove("hl"));
+    document.querySelectorAll(".edge.hover-hl").forEach((e) => e.classList.remove("hover-hl"));
+  }
+
+  function bindHover(container) {
+    container.addEventListener("mouseover", (e) => setHover(e.target.closest(".fi")));
+    container.addEventListener("mouseleave", () => clearHover());
   }
 
   // ---------------------------------------------------------------- dynamic render
@@ -471,16 +701,22 @@
     updateEdges();
     renderNow();
     renderStepper();
-    renderPath();
+    renderTimeline();
     setRunStatus();
     renderEmptyHint();
-    const active = S.st.active;
+    const vst = viewSt();
+    const active = vst.active;
     if (active !== S.lastActive) {
       S.lastActive = active;
+      const last = vst.path[vst.path.length - 1];
+      if (S.playing && active && last) animateHandoff({ data: { frm: last.from || START, to: active } });
       if (active && S.follow) ensureVisible(active);
       document.title = active ? `● ${nameOf(active)} · VisualAgents` : `VisualAgents · ${S.bp.project}`;
     }
-    while (S.pendingAnims.length) animateHandoff(S.pendingAnims.shift());
+    while (S.pendingAnims.length) {
+      const ev = S.pendingAnims.shift();
+      if (S.scrubT == null) animateHandoff(ev);
+    }
     if (S.drawerId) refreshDrawerSoon();
   }
 
@@ -493,7 +729,7 @@
   };
 
   function updateNodes() {
-    const st = S.st;
+    const st = viewSt();
     for (const a of S.agents) {
       const node = S.nodeEls[a.id];
       if (!node) continue;
@@ -515,8 +751,13 @@
     S.termEls[START] && S.termEls[START].classList.toggle("lit", started);
     S.termEls[END] && S.termEls[END].classList.toggle("lit", st.run.status === "finished");
 
-    // thought bubble under the active agent
+    positionBubble(st);
+  }
+
+  // thought bubble under the active agent
+  function positionBubble(st) {
     const b = S.bubble;
+    if (!b) return;
     const act = st.active && S.layout && S.layout.nodes[st.active];
     if (!act) {
       b.hidden = true;
@@ -526,6 +767,7 @@
     const text = s.activity || "Working…";
     const kind = s.activity_kind || "log";
     b.hidden = false;
+    b.classList.toggle("instant", document.body.classList.contains("dragging-node"));
     b.style.setProperty("--agent", colorVar(st.active));
     b.style.left = `${act.x - 20}px`;
     b.style.top = `${act.y + act.h + 14}px`;
@@ -540,7 +782,7 @@
   }
 
   function updateEdges() {
-    const st = S.st;
+    const st = viewSt();
     const counts = st.edge_counts || {};
     const last = st.path && st.path.length ? st.path[st.path.length - 1] : null;
     const hotKey = st.active && last ? `${last.from || START}->${last.agent}` : null;
@@ -558,7 +800,8 @@
 
   function renderNow() {
     const box = $("#now");
-    const st = S.st;
+    const st = viewSt();
+    const at = S.scrubT != null && st.run.started ? `At ${fmtClock(S.scrubT - st.run.started)}` : "Working now";
     const steps = S.bp.steps || [];
     const stepTxt = st.step_index >= 0 && steps[st.step_index] ? `Step ${st.step_index + 1} of ${steps.length} · ${steps[st.step_index].title}` : "";
     const id = st.active;
@@ -566,10 +809,10 @@
       const a = S.byId[id];
       const s = st.agents[id] || {};
       const last = st.path[st.path.length - 1];
-      const since = last ? fmtDur(now() - last.start) : "";
+      const since = last ? fmtDur(viewNow() - last.start) : "";
       box.style.setProperty("--agent", colorVar(id));
       box.innerHTML = `
-        <div class="now-eyebrow"><span>Working now</span><span>${esc(stepTxt)}</span></div>
+        <div class="now-eyebrow"><span>${at}</span><span>${esc(stepTxt)}</span></div>
         <div class="now-agent"><span class="node-dot"></span><div><div class="now-name">${esc(a.name)}</div><div class="now-role">${esc(a.role || "")}</div></div></div>
         <div class="now-activity">${esc(s.activity || "Working…")}</div>
         <div class="now-stats"><span>in this agent <b>${since}</b></span><span>visit <b>#${s.visits || 1}</b></span><span>tool calls <b>${s.tools || 0}</b></span><span>handoffs <b>${Math.max(0, (st.path_total || 1) - 1)}</b></span></div>`;
@@ -588,13 +831,13 @@
       return;
     }
     const waiting = run.status === "running" ? "Output is flowing - waiting for the first agent to speak up…" : S.meta.mode === "blueprint" ? "Blueprint view - no run attached." : "Waiting for the run to start…";
-    box.innerHTML = `<div class="now-eyebrow"><span>Working now</span><span>${esc(stepTxt)}</span></div><div class="now-role" style="margin-top:8px">${esc(waiting)}</div>`;
+    box.innerHTML = `<div class="now-eyebrow"><span>${at}</span><span>${esc(stepTxt)}</span></div><div class="now-role" style="margin-top:8px">${esc(waiting)}</div>`;
   }
 
   function renderStepper() {
     const nav = $("#stepper");
     const steps = S.bp.steps || [];
-    const st = S.st;
+    const st = viewSt();
     const finished = st.run.status === "finished";
     nav.textContent = "";
     steps.forEach((s, i) => {
@@ -627,36 +870,6 @@
     for (const id in S.nodeEls) S.nodeEls[id].classList.toggle("dimmed", !!ids && !ids.includes(id));
   }
 
-  function renderPath() {
-    const box = $("#path");
-    const st = S.st;
-    const atEnd = box.scrollLeft + box.clientWidth >= box.scrollWidth - 30;
-    box.textContent = "";
-    const crumb = (id, cls, sub) => {
-      const c = el("span", `crumb ${cls || ""}`);
-      c.style.setProperty("--agent", colorVar(id));
-      const dot = el("i");
-      c.append(dot, document.createTextNode(nameOf(id)));
-      if (sub) c.appendChild(el("small", "", sub));
-      return c;
-    };
-    const sep = () => el("span", "crumb-sep", "›");
-    if (!st.path.length) {
-      box.appendChild(el("span", "muted small", "No handoffs yet."));
-      return;
-    }
-    if ((st.path_total || 0) > st.path.length) box.append(el("span", "muted small", "…"), sep());
-    else box.append(crumb(START, ""), sep());
-    st.path.forEach((p, i) => {
-      const isCur = i === st.path.length - 1 && st.active === p.agent;
-      const dur = p.end ? fmtDur(p.end - p.start) : isCur ? fmtDur(now() - p.start) : "";
-      box.appendChild(crumb(p.agent, isCur ? "current" : "", dur));
-      if (i < st.path.length - 1) box.appendChild(sep());
-    });
-    if (st.run.status === "finished") box.append(sep(), crumb(END, ""));
-    if (atEnd || S.autoScroll) box.scrollLeft = box.scrollWidth;
-  }
-
   function setRunStatus(disconnected) {
     const pill = $("#run-status");
     const st = S.st;
@@ -679,11 +892,7 @@
     if (!run || !run.started) { t.textContent = ""; return; }
     const end = run.ended || now();
     t.textContent = fmtClock(end - run.started);
-    if (run.status === "running" && S.st.active) {
-      const cur = $(".crumb.current small");
-      const last = S.st.path[S.st.path.length - 1];
-      if (cur && last) cur.textContent = fmtDur(now() - last.start);
-    }
+    if (run.status === "running") renderTimeline();
   }
 
   function renderEmptyHint() {
@@ -701,7 +910,7 @@
   // ---------------------------------------------------------------- feed
   function addEvent(ev, live) {
     S.events.push(ev);
-    if (S.events.length > 8000) S.events.splice(0, 2000);
+    if (S.events.length > 20000) S.events.splice(0, 5000);
     if (ev.kind === "narration") S.narrated = true;
     if (live && ev.kind === "handoff") {
       S.pendingAnims.push(ev);
@@ -712,6 +921,7 @@
   }
 
   function passes(ev) {
+    if (ev.seq <= S.clearedSeq) return false;
     if (S.hideLogs && (ev.kind === "log" || ev.kind === "status")) return false;
     if (!S.filter) return true;
     if (ev.agent === S.filter) return true;
@@ -738,6 +948,13 @@
     }
     const item = el("div", `fi k-${ev.kind}`);
     if (ev.agent) item.style.setProperty("--agent", colorVar(ev.agent));
+    item.dataset.ts = ev.ts;
+    if (ev.agent) item.dataset.agent = ev.agent;
+    if (ev.kind === "handoff" && ev.data) {
+      item.dataset.frm = ev.data.frm || "";
+      item.dataset.to = ev.data.to || ev.agent || "";
+    }
+    if (S.scrubT != null && ev.ts > S.scrubT) item.classList.add("future");
     item.appendChild(el("span", "fi-time", fmtTime(ev.ts)));
     const head = el("div", "fi-head");
     if (ev.kind === "handoff") {
@@ -767,7 +984,7 @@
   }
 
   function stickToEnd() {
-    if (!S.autoScroll || S.stickRaf) return;
+    if (!S.autoScroll || S.stickRaf || S.scrubT != null) return;
     S.stickRaf = requestAnimationFrame(() => {
       S.stickRaf = 0;
       S.programmaticScroll = true;
@@ -816,6 +1033,256 @@
     for (const a of S.agents) mk(a.id, a.name);
   }
 
+
+  // ---------------------------------------------------------------- time ruler
+  const track = $("#tl-track");
+
+  function tlRange() {
+    const run = S.st && S.st.run;
+    if (!run || !run.started) return null;
+    return { t0: run.started, t1: Math.max(run.started + 1, run.ended || now()) };
+  }
+
+  function fullHistory() {
+    const key = `${S.seqMax}|${S.st.run.ended}|${S.st.run.started}`;
+    if (!S.fullHist || S.fullHist.key !== key) S.fullHist = { key, st: buildHistory(Infinity) };
+    return S.fullHist.st;
+  }
+
+  function renderTimeline() {
+    const r = tlRange();
+    document.body.classList.toggle("scrubbing", S.scrubT != null);
+    $("#tl-empty").hidden = !!r;
+    $("#tl-head").hidden = !r;
+    $("#tl-fade").hidden = !r || S.scrubT == null;
+    const bar = $("#tl-bar"), ticks = $("#tl-ticks"), flags = $("#tl-steps");
+    if (!r) {
+      bar.textContent = ticks.textContent = flags.textContent = "";
+      S.tlSig = "";
+      return;
+    }
+    const W = track.clientWidth || 600;
+    const running = S.st.run.status === "running";
+    const sig = `${S.seqMax}|${Math.floor(r.t1 * 2)}|${W}|${S.st.run.status}`;
+    if (sig !== S.tlSig) {
+      S.tlSig = sig;
+      const span = r.t1 - r.t0;
+      const pct = (t) => `${clamp((t - r.t0) / span, 0, 1) * 100}%`;
+      const full = fullHistory();
+      bar.textContent = "";
+      full.path.forEach((p, i) => {
+        const end = p.end || r.t1;
+        const live = !p.end && running && i === full.path.length - 1;
+        const seg = el("div", `tl-seg${live ? " running" : ""}`);
+        seg.style.left = pct(p.start);
+        seg.style.width = `${Math.max(0.3, ((end - p.start) / span) * 100)}%`;
+        seg.style.setProperty("--agent", colorVar(p.agent));
+        seg.dataset.agent = p.agent;
+        seg.dataset.start = p.start;
+        seg.dataset.end = end;
+        if (((end - p.start) / span) * W > 58) seg.textContent = nameOf(p.agent);
+        seg.title = `${nameOf(p.agent)} · ${fmtClock(p.start - r.t0)}–${fmtClock(end - r.t0)} (${fmtDur(end - p.start)})`;
+        bar.appendChild(seg);
+      });
+      const hov = S.hoverItem;
+      if (hov && hov.isConnected && hov.dataset.ts) {
+        const seg = findSegment(+hov.dataset.ts);
+        if (seg) seg.classList.add("hl");
+      }
+      ticks.textContent = "";
+      const target = span / Math.max(1, W / 90);
+      const every = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200].find((x) => x >= target) || 7200;
+      for (let t = 0; t <= span + 1e-6; t += every) {
+        const tk = el("span", "tl-tick", fmtClock(t));
+        tk.style.left = `${(t / span) * 100}%`;
+        ticks.appendChild(tk);
+      }
+      flags.textContent = "";
+      const steps = S.bp.steps || [];
+      let lastLabelX = -1e9;
+      for (const m of full.marks) {
+        const x = ((m.t - r.t0) / span) * W;
+        const s = steps[m.step];
+        const f = el("span", "tl-flag");
+        f.style.left = pct(m.t);
+        const room = x - lastLabelX > 120 && W - x > 60;
+        f.innerHTML = `<b>${m.step + 1}</b>${room && s ? esc(s.title) : ""}`;
+        if (room) lastLabelX = x;
+        f.title = s ? `Step ${m.step + 1}: ${s.title}` : `Step ${m.step + 1}`;
+        flags.appendChild(f);
+      }
+    }
+    positionPlayhead(r);
+  }
+
+  function positionPlayhead(r = tlRange()) {
+    if (!r) return;
+    const T = S.scrubT == null ? r.t1 : S.scrubT;
+    const f = clamp((T - r.t0) / (r.t1 - r.t0), 0, 1);
+    const head = $("#tl-head");
+    head.style.left = `${f * 100}%`;
+    $("#tl-fade").style.left = `${f * 100}%`;
+    const st = viewSt();
+    const who = st.active ? nameOf(st.active) : "";
+    const when = S.scrubT == null ? (S.st.run.status === "running" ? "Live" : "End") : fmtClock(T - r.t0);
+    const tip = $("#tl-tip");
+    tip.textContent = who ? `${when} · ${who}` : when;
+    tip.style.transform = f > 0.88 ? "translateX(-100%)" : f < 0.12 ? "translateX(0)" : "translateX(-50%)";
+    track.setAttribute("aria-valuemax", String(Math.round(r.t1 - r.t0)));
+    track.setAttribute("aria-valuenow", String(Math.round(T - r.t0)));
+    track.setAttribute("aria-valuetext", tip.textContent);
+    const liveBtn = $("#tl-live");
+    liveBtn.classList.toggle("on", S.scrubT == null);
+    liveBtn.textContent = S.scrubT == null ? "Live" : "Go live";
+    $("#tl-play").innerHTML = icon(S.playing ? "pause" : "play");
+    $("#tl-play").title = S.playing ? "Pause (Space)" : S.scrubT == null ? "Replay this run (Space)" : "Play from here (Space)";
+  }
+
+  function findSegment(ts) {
+    let hit = null;
+    for (const seg of $("#tl-bar").children) if (+seg.dataset.start <= ts) hit = seg;
+    return hit;
+  }
+
+  function seek(t) {
+    const r = tlRange();
+    if (!r) return;
+    S.seekTo = clamp(t, r.t0, r.t1);
+    if (S.seekRaf) return;
+    S.seekRaf = requestAnimationFrame(() => {
+      S.seekRaf = 0;
+      S.scrubT = S.seekTo;
+      renderState();
+      syncFeedToTime();
+    });
+  }
+
+  function goLive() {
+    S.scrubT = null;
+    S.playing = false;
+    S.hist = null;
+    renderState();
+    syncFeedToTime();
+    S.autoScroll = true;
+    $("#jump").hidden = true;
+    stickToEnd();
+  }
+
+  function togglePlay() {
+    const r = tlRange();
+    if (!r) return;
+    if (S.playing) {
+      S.playing = false;
+      positionPlayhead(r);
+      return;
+    }
+    if (S.scrubT == null || S.scrubT >= r.t1 - 0.1) S.scrubT = r.t0; // replay from the start
+    S.playing = true;
+    S.lastFrame = performance.now();
+    requestAnimationFrame(playStep);
+    positionPlayhead(r);
+  }
+
+  function playStep(ts) {
+    if (!S.playing) return;
+    const r = tlRange();
+    const dt = Math.min(0.25, (ts - S.lastFrame) / 1000);
+    S.lastFrame = ts;
+    const t = S.scrubT + dt * S.speed;
+    if (t >= r.t1 - 0.05) {
+      goLive();
+      return;
+    }
+    S.scrubT = t;
+    if (ts - (S.lastPlayRender || 0) > 60) {
+      S.lastPlayRender = ts;
+      renderState();
+      syncFeedToTime();
+    } else positionPlayhead(r);
+    requestAnimationFrame(playStep);
+  }
+
+  function syncFeedToTime() {
+    const T = S.scrubT;
+    let lastPast = null;
+    for (const it of feedEl.children) {
+      const fut = T != null && +it.dataset.ts > T;
+      it.classList.toggle("future", fut);
+      it.classList.remove("at-time");
+      if (!fut) lastPast = it;
+    }
+    if (T != null && lastPast) {
+      lastPast.classList.add("at-time");
+      S.programmaticScroll = true;
+      feedEl.scrollTop = lastPast.offsetTop - feedEl.offsetTop - feedEl.clientHeight * 0.6;
+    }
+  }
+
+  function bindTimeline() {
+    let scrubbing = false;
+    const xToTime = (cx) => {
+      const r = tlRange();
+      const b = track.getBoundingClientRect();
+      return r.t0 + clamp((cx - b.left) / b.width, 0, 1) * (r.t1 - r.t0);
+    };
+    track.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !tlRange()) return;
+      scrubbing = true;
+      S.playing = false;
+      track.setPointerCapture(e.pointerId);
+      track.classList.add("grabbing");
+      seek(xToTime(e.clientX));
+    });
+    track.addEventListener("pointermove", (e) => {
+      const r = tlRange();
+      if (!r) return;
+      if (scrubbing) {
+        seek(xToTime(e.clientX));
+        return;
+      }
+      const hover = $("#tl-hover");
+      const b = track.getBoundingClientRect();
+      hover.hidden = false;
+      hover.style.left = `${clamp((e.clientX - b.left) / b.width, 0, 1) * 100}%`;
+      hover.dataset.label = fmtClock(xToTime(e.clientX) - r.t0);
+    });
+    const end = (e) => {
+      if (!scrubbing) return;
+      scrubbing = false;
+      track.classList.remove("grabbing");
+      const r = tlRange();
+      if (r && xToTime(e.clientX) >= r.t1 - (r.t1 - r.t0) * 0.005) goLive();
+    };
+    track.addEventListener("pointerup", end);
+    track.addEventListener("pointercancel", end);
+    track.addEventListener("pointerleave", () => { $("#tl-hover").hidden = true; });
+    track.addEventListener("keydown", (e) => {
+      const r = tlRange();
+      if (!r) return;
+      const T = S.scrubT == null ? r.t1 : S.scrubT;
+      const stepS = e.shiftKey ? 10 : 1;
+      if (e.key === "ArrowLeft") seek(T - stepS);
+      else if (e.key === "ArrowRight") (T + stepS >= r.t1 ? goLive() : seek(T + stepS));
+      else if (e.key === "Home") seek(r.t0);
+      else if (e.key === "End") goLive();
+      else return;
+      e.preventDefault();
+    });
+    const bar = $("#tl-bar");
+    bar.addEventListener("mouseover", (e) => setHover(e.target.closest(".tl-seg")));
+    bar.addEventListener("mouseleave", () => clearHover());
+    $("#tl-live").onclick = goLive;
+    $("#tl-play").onclick = togglePlay;
+    const speeds = [1, 2, 4, 8, 16];
+    const speedBtn = $("#tl-speed");
+    speedBtn.textContent = `${S.speed}×`;
+    speedBtn.onclick = () => {
+      S.speed = speeds[(speeds.indexOf(S.speed) + 1) % speeds.length];
+      speedBtn.textContent = `${S.speed}×`;
+    };
+    new ResizeObserver(() => { S.tlSig = ""; if (S.st) renderTimeline(); }).observe(track);
+  }
+
   // ---------------------------------------------------------------- animation & viewport
   function animateHandoff(ev) {
     const d = ev.data || {};
@@ -846,14 +1313,32 @@
     canvas.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
   }
 
+  function contentBox() {
+    const ns = Object.values(S.layout.nodes);
+    let x1 = Math.min(...ns.map((n) => n.x)), y1 = Math.min(...ns.map((n) => n.y));
+    let x2 = Math.max(...ns.map((n) => n.x + n.w)), y2 = Math.max(...ns.map((n) => n.y + n.h)) + 110; // bubble room
+    try {
+      const b = S.edgeGroup.getBBox();
+      if (b.width || b.height) {
+        x1 = Math.min(x1, b.x); y1 = Math.min(y1, b.y - 14);
+        x2 = Math.max(x2, b.x + b.width); y2 = Math.max(y2, b.y + b.height + 10);
+      }
+    } catch { /* not rendered yet */ }
+    return { x: x1 - 20, y: y1 - 20, w: x2 - x1 + 40, h: y2 - y1 + 40 };
+  }
+
   function fit(animate) {
     if (!S.layout) return;
-    const b = S.layout.bounds;
+    const b = contentBox();
     const W = wrap.clientWidth, H = wrap.clientHeight;
     if (!W || !H) return;
-    const pad = 40;
+    const pad = 32;
     const k = clamp(Math.min((W - pad * 2) / b.w, (H - pad * 2) / b.h), 0.3, 1.2);
-    S.view = { k, x: (W - b.w * k) / 2, y: Math.max(pad / 2, (H - b.h * k) / 2) };
+    S.view = {
+      k,
+      x: (W - b.w * k) / 2 - (b.x + S.shift.x) * k,
+      y: Math.max(pad / 2, (H - b.h * k) / 2) - (b.y + S.shift.y) * k,
+    };
     applyView(animate);
   }
 
@@ -861,7 +1346,7 @@
     const n = S.layout && S.layout.nodes[id];
     if (!n) return;
     const v = S.view, W = wrap.clientWidth, H = wrap.clientHeight;
-    const ox = -S.layout.bounds.x, oy = -S.layout.bounds.y;
+    const ox = S.shift.x, oy = S.shift.y;
     const x1 = (n.x + ox - 30) * v.k + v.x, y1 = (n.y + oy - 20) * v.k + v.y;
     const x2 = (n.x + ox + n.w + 60) * v.k + v.x, y2 = (n.y + oy + n.h + 120) * v.k + v.y;
     if (x1 >= 0 && y1 >= 0 && x2 <= W && y2 <= H) return;
@@ -888,7 +1373,7 @@
     }, { passive: false });
     let drag = null;
     wrap.addEventListener("pointerdown", (e) => {
-      if (e.target.closest(".node, button, .legend, .empty-hint")) return;
+      if (e.target.closest(".node, .terminal-node, button, .legend, .empty-hint")) return;
       drag = { x: e.clientX, y: e.clientY, vx: S.view.x, vy: S.view.y, id: e.pointerId };
       wrap.setPointerCapture(e.pointerId);
       wrap.classList.add("panning");
@@ -916,6 +1401,7 @@
     $("#zoom-in").onclick = () => zoomAt(1.2, ...center());
     $("#zoom-out").onclick = () => zoomAt(1 / 1.2, ...center());
     $("#fit").onclick = () => { S.userMoved = false; fit(true); };
+    $("#relayout").onclick = resetLayout;
     $("#follow").onclick = (e) => {
       S.follow = !S.follow;
       e.currentTarget.setAttribute("aria-pressed", String(S.follow));
@@ -1081,26 +1567,31 @@
     document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeModal));
     $("#drawer-close").onclick = closeDrawer;
     $("#hide-logs").onchange = (e) => { S.hideLogs = e.target.checked; rebuildFeed(); };
-    $("#clear-feed").onclick = () => { S.events = []; rebuildFeed(); };
+    $("#clear-feed").onclick = () => { S.clearedSeq = S.seqMax; rebuildFeed(); };
     $("#reset-view").onclick = () => fetch("/api/reset", { method: "POST" });
     feedEl.addEventListener("scroll", () => {
       const atEnd = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 40;
       if (S.programmaticScroll) {
         S.programmaticScroll = false;
-        if (!atEnd) feedEl.scrollTop = feedEl.scrollHeight;
+        if (!atEnd && S.scrubT == null && S.autoScroll) feedEl.scrollTop = feedEl.scrollHeight;
         return;
       }
       S.autoScroll = atEnd;
-      $("#jump").hidden = atEnd;
+      $("#jump").hidden = atEnd || S.scrubT != null;
     });
     $("#jump").onclick = () => { feedEl.scrollTop = feedEl.scrollHeight; S.autoScroll = true; $("#jump").hidden = true; };
     document.addEventListener("keydown", (e) => {
       if (e.target.closest("input, textarea")) return;
+      if (e.key === " " && !e.target.closest("button, [role=slider]")) { e.preventDefault(); togglePlay(); return; }
       if (e.key === "Escape") { closeModal(); closeDrawer(); }
+      else if (e.key === "l" || e.key === "L") goLive();
       else if (e.key === "b" || e.key === "B") $("#btn-blueprint").click();
       else if (e.key === "f" || e.key === "F") { S.userMoved = false; fit(true); }
     });
     bindViewport();
+    bindTimeline();
+    bindHover(feedEl);
+    bindHover($("#drawer-body"));
     setInterval(tickTimer, 1000);
   }
 

@@ -218,6 +218,25 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 }
 @keyframes ring { 0% { opacity: .7; transform: scale(1); } 100% { opacity: 0; transform: scale(1.08); } }
 .node.dimmed { opacity: .35; }
+.node { cursor: grab; touch-action: none; user-select: none; }
+.terminal-node { cursor: grab; touch-action: none; user-select: none; }
+.node.dragging, .terminal-node.dragging {
+  cursor: grabbing; z-index: 6; transition: box-shadow .2s, border-color .2s;
+  box-shadow: 0 18px 40px rgba(0,0,0,.22), 0 0 0 2px color-mix(in srgb, var(--agent, var(--accent)) 40%, transparent);
+}
+body.dragging-node { cursor: grabbing; }
+.node.hl {
+  opacity: 1; z-index: 4; border-color: var(--agent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--agent) 30%, transparent), 0 12px 30px color-mix(in srgb, var(--agent) 28%, transparent);
+}
+.terminal-node.hl { color: var(--text-primary); border-color: var(--text-secondary); }
+.node.bounce, .terminal-node.bounce { animation: bounce .6s cubic-bezier(.28, 1.5, .5, 1); }
+@keyframes bounce {
+  0% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-12px) scale(1.045); }
+  62% { transform: translateY(2px) scale(.995); }
+  100% { transform: none; }
+}
 .node.dynamic { border-style: dashed; }
 
 .terminal-node {
@@ -241,6 +260,7 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .bubble-kind svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; }
 .bubble-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-primary); }
 .bubble.fresh { animation: pop .3s ease; }
+.bubble.instant { transition: none; }
 @keyframes pop { from { transform: translateY(4px); opacity: .4; } to { transform: none; opacity: 1; } }
 
 /* -- edges ------------------------------------------------------------ */
@@ -250,6 +270,7 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .edge.terminal { stroke-dasharray: 3 4; }
 .edge.traversed { stroke: var(--text-secondary); }
 .edge.hot { stroke: var(--hot, var(--accent)); stroke-width: 3; }
+.edge.hover-hl { stroke: var(--hot, var(--accent)); stroke-width: 3.5; opacity: 1; }
 .edge-label {
   font: 600 11px var(--font); fill: var(--text-muted); paint-order: stroke; stroke: var(--bg); stroke-width: 5px;
 }
@@ -322,26 +343,86 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .fi.k-status { opacity: .8; }
 .fi.k-status .fi-body, .fi.k-log .fi-body { color: var(--text-muted); }
 .fi.selected-agent { border-left-color: var(--agent); }
+.fi.future { opacity: .32; }
+.fi.at-time { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.fi[data-agent]:hover, .fi[data-to]:hover { border-left-color: var(--agent); }
 .jump {
   position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); border-radius: 99px; padding: 6px 14px;
   background: var(--text-primary); color: var(--bg); border: 0; font-weight: 600; font-size: 12px; cursor: pointer; box-shadow: var(--shadow);
 }
 
-/* -- path bar --------------------------------------------------------- */
-.pathbar {
-  display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--surface-1); border-top: 1px solid var(--border); min-width: 0;
+/* -- time ruler ------------------------------------------------------ */
+.timeline {
+  display: flex; align-items: center; gap: 14px; padding: 8px 16px 8px; background: var(--surface-1);
+  border-top: 1px solid var(--border); min-width: 0; position: relative; z-index: 3;
 }
-.pathbar-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 650; color: var(--text-muted); white-space: nowrap; }
-.path { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: none; min-height: 28px; }
-.path::-webkit-scrollbar { display: none; }
-.crumb {
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 7px; font-size: 12px; white-space: nowrap;
-  background: var(--surface-2); color: var(--text-secondary); border: 1px solid transparent;
+.tl-controls { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.tl-controls .icon-btn svg { width: 14px; height: 14px; stroke-width: 0; }
+.tl-speed {
+  font: 600 11px var(--mono); padding: 5px 7px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--surface-1); color: var(--text-secondary); cursor: pointer; min-width: 36px;
 }
-.crumb i { width: 7px; height: 7px; border-radius: 50%; background: var(--agent, var(--text-muted)); display: block; }
-.crumb small { color: var(--text-muted); font-family: var(--mono); font-size: 10.5px; }
-.crumb.current { border-color: var(--agent); color: var(--text-primary); background: var(--surface-1); font-weight: 600; }
-.crumb-sep { color: var(--text-muted); font-size: 11px; }
+.tl-live {
+  display: inline-flex; align-items: center; gap: 6px; font: 700 11px var(--font); letter-spacing: .06em;
+  text-transform: uppercase; padding: 5px 10px; border-radius: 99px; cursor: pointer; white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, var(--surface-1));
+  color: var(--accent);
+}
+.tl-live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.tl-live.on { color: var(--text-secondary); border-color: var(--border); background: var(--surface-1); }
+.tl-live.on::before { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.speed-hidden { display: none; }
+
+.tl-track { position: relative; flex: 1; min-width: 0; height: 60px; cursor: pointer; touch-action: none; outline: none; }
+.tl-track.grabbing, .tl-track.grabbing * { cursor: grabbing; }
+.tl-track:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
+.tl-steps { position: absolute; left: 0; right: 0; top: 0; height: 16px; }
+.tl-flag {
+  position: absolute; top: 0; height: 16px; display: flex; align-items: center; gap: 4px; padding-left: 4px;
+  border-left: 1.5px solid var(--border-strong); font-size: 10.5px; color: var(--text-secondary); white-space: nowrap;
+}
+.tl-flag b { font: 700 10px var(--mono); color: var(--accent); }
+.tl-bar {
+  position: absolute; left: 0; right: 0; top: 18px; height: 22px; background: var(--surface-2); border-radius: 6px;
+  overflow: hidden; border: 1px solid var(--border);
+}
+.tl-seg {
+  position: absolute; top: 0; bottom: 0; padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 21px;
+  color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--agent) 24%, var(--surface-1)); box-shadow: inset 0 3px 0 var(--agent);
+  border-right: 2px solid var(--surface-1); transition: background .15s;
+}
+.tl-seg.running {
+  background-image: repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--agent) 16%, transparent) 6px 12px);
+  background-size: 17px 17px; animation: stripes 1s linear infinite;
+}
+@keyframes stripes { to { background-position: 17px 0; } }
+.tl-seg:hover, .tl-seg.hl { background-color: color-mix(in srgb, var(--agent) 42%, var(--surface-1)); }
+.tl-fade { position: absolute; top: 18px; height: 22px; right: 0; background: color-mix(in srgb, var(--surface-1) 62%, transparent); pointer-events: none; border-radius: 0 6px 6px 0; }
+.tl-ticks { position: absolute; left: 0; right: 0; top: 44px; height: 14px; }
+.tl-tick { position: absolute; transform: translateX(-50%); font: 10.5px/14px var(--mono); color: var(--text-muted); white-space: nowrap; }
+.tl-tick:first-child { transform: none; }
+.tl-tick::before { content: ""; position: absolute; left: 50%; top: -4px; height: 3px; border-left: 1px solid var(--border-strong); }
+.tl-tick:first-child::before { left: 0; }
+.tl-hover { position: absolute; top: 16px; height: 26px; border-left: 1px dashed var(--text-muted); pointer-events: none; }
+.tl-hover::after {
+  content: attr(data-label); position: absolute; top: 28px; left: 4px; font: 10px var(--mono); color: var(--text-secondary);
+  background: var(--surface-1); padding: 0 3px;
+}
+.tl-head { position: absolute; top: 13px; height: 32px; width: 0; pointer-events: none; }
+.tl-head::before { content: ""; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; border-radius: 2px; background: var(--text-primary); }
+.tl-knob {
+  position: absolute; left: -7px; top: 9px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--surface-1); border: 2.5px solid var(--text-primary); box-shadow: var(--shadow);
+}
+.tl-tip {
+  position: absolute; bottom: calc(100% + 4px); left: 0; transform: translateX(-50%); white-space: nowrap;
+  background: var(--text-primary); color: var(--bg); font: 600 11px var(--font); padding: 3px 8px; border-radius: 6px;
+}
+.tl-empty { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--text-muted); }
+body.scrubbing .tl-knob { border-color: var(--accent); }
+body.scrubbing .tl-head::before { background: var(--accent); }
+body.scrubbing .tl-tip { background: var(--accent); color: #fff; }
 
 /* -- modal (blueprint) ------------------------------------------------ */
 .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; }
@@ -405,7 +486,7 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
   .canvas-wrap { height: 58vh; min-height: 360px; }
   .side { border-left: 0; border-top: 1px solid var(--border); }
   .feed { max-height: 70vh; }
-  .pathbar { position: sticky; bottom: 0; }
+  .timeline { position: sticky; bottom: 0; }
 }
 @media (max-width: 600px) {
   .topbar { flex-wrap: wrap; padding: 10px 16px; gap: 8px; }
@@ -413,6 +494,8 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
   .project { order: 5; width: 100%; }
   .btn span { display: none; }
   .legend { display: none; }
+  .tl-speed, #reset-view { display: none; }
+  .timeline { gap: 10px; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .modal { padding: 0; }
   .modal-card { max-height: 100vh; height: 100%; border-radius: 0; }

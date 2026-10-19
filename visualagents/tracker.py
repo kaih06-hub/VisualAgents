@@ -422,7 +422,7 @@ class Tracker:
         text = f"{frm} → {self._name(aid)}" + (" (returns)" if returning else "")
         if reason and reason not in text:
             text += f" · {_short(reason, 120)}"
-        return [self._event("handoff", aid, text, source=source, frm=prev or START, to=aid)]
+        return [self._event("handoff", aid, text, source=source, frm=prev or START, to=aid, step=self.step_index)]
 
     def _count_edge(self, src: str, dst: str) -> None:
         key = f"{src}->{dst}"

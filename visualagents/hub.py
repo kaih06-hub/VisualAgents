@@ -83,7 +83,7 @@ class Hub:
         self.state_version += 1
         self.cond.notify_all()
 
-    def snapshot(self, max_events: int = 1500) -> dict[str, Any]:
+    def snapshot(self, max_events: int = 6000) -> dict[str, Any]:
         with self.cond:
             return {
                 "blueprint": self.blueprint,
