@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/kaih06-hub/VisualAgents/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kaih06-hub/VisualAgents/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2ea44f">
   <img alt="Runs locally" src="https://img.shields.io/badge/runs-100%25%20locally-555">
