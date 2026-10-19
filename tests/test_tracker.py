@@ -160,3 +160,25 @@ def test_failed_run_marks_active_agent_as_error():
     assert s["agents"]["writer"]["status"] == "error"
     assert s["agents"]["writer"]["errors"] == 1
     assert s["run"]["status"] == "failed"
+
+
+def test_recurring_supervisor_does_not_skip_ahead_in_steps():
+    bp = bpm.normalize({
+        "agents": [{"name": n} for n in ("supervisor", "researcher", "coder", "reviewer")],
+        "steps": [
+            {"title": "Route", "agents": ["supervisor"]},
+            {"title": "Research", "agents": ["researcher"]},
+            {"title": "Implement", "agents": ["coder"]},
+            {"title": "Review", "agents": ["reviewer"]},
+            {"title": "Refine", "agents": ["coder", "reviewer"]},
+            {"title": "Finish", "agents": ["supervisor"]},
+        ],
+    })
+    t = make_tracker(bp)
+    seen = []
+    for agent in ["supervisor", "researcher", "supervisor", "coder", "supervisor", "reviewer", "supervisor",
+                  "coder", "supervisor", "reviewer", "supervisor"]:
+        t.ingest_structured({"type": "agent_start", "agent": agent})
+        t.ingest_structured({"type": "agent_end", "agent": agent})
+        seen.append(t.step_index)
+    assert seen == [0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5]

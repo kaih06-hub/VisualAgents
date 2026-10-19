@@ -52,7 +52,7 @@
   const MERGEABLE = new Set(["log", "thought", "output", "observation", "tool_input", "message", "status"]);
   const LABEL_PREFIX = /^#*\s*(?:Thought|Thinking|Final Answer|Using Tool|Tool Input|Tool Output|Tool Result|Action Input|Action|Observation|Task|Answer|Output)\s*:\s*/i;
   const START = "__start__", END = "__end__";
-  const NODE_W = 240, NODE_H = 96, TERM_W = 76, TERM_H = 36, GAP_X = 92, GAP_Y = 64, GAP_TERM = 56;
+  const NODE_W = 240, NODE_H = 96, TERM_W = 76, TERM_H = 36, GAP_X = 92, GAP_Y = 112, GAP_TERM = 56;
 
   // ---------------------------------------------------------------- state
   const S = {
@@ -256,17 +256,65 @@
     const right = Math.max(...all.map((n) => n.x + n.w));
     const bottom = Math.max(...all.map((n) => n.y + n.h));
     let backCount = 0;
+    const keys = new Set(edges.map((e) => e.key));
     const routed = edges.map((e) => {
       const p = nodes[e.from], q = nodes[e.to];
-      const same = layer[e.from] === layer[e.to];
-      const isBack = back.has(e.key) || layer[e.to] < layer[e.from];
-      const idx = isBack || same ? backCount++ : 0;
-      return { ...e, back: isBack, d: lr ? pathLR(p, q, isBack, same, idx, bottom) : pathTB(p, q, isBack, same, idx, right) };
+      const lf = layer[e.from], lt = layer[e.to];
+      const same = lf === lt;
+      const isBack = back.has(e.key) || lt < lf;
+      let d, labelPos;
+      if (Math.abs(lt - lf) === 1 && keys.has(`${e.to}->${e.from}`)) {
+        d = pathPair(p, q, lt > lf, lr); // a <-> b handoff in both directions: two parallel arrows
+        labelPos = lr ? (lt > lf ? "above" : "below") : (lt > lf ? "left" : "right");
+      } else if (isBack || same) {
+        const idx = backCount++;
+        d = lr ? pathLR(p, q, isBack, same, idx, bottom) : pathTB(p, q, isBack, same, idx, right);
+      } else if (lt - lf > 1) {
+        const mids = all.filter((n) => n.layer > lf && n.layer < lt);
+        d = pathAround(p, q, mids, lr);
+      } else {
+        d = lr ? pathLR(p, q, false, false, 0, bottom) : pathTB(p, q, false, false, 0, right);
+      }
+      return { ...e, back: isBack, d, labelPos };
     });
     const extra = backCount ? 70 + backCount * 18 : 0;
     const w = (lr ? end : right + extra) + 40;
     const h = (lr ? bottom + extra : end) + 130;
     return { orient, nodes, edges: routed, bounds: { x: -20, y: -20, w: w + 20, h: h + 20 } };
+  }
+
+  function pathPair(a, b, forward, lr) {
+    const off = 9;
+    if (lr) {
+      const x1 = forward ? a.x + a.w : a.x, x2 = forward ? b.x : b.x + b.w;
+      const y1 = a.y + a.h / 2 + (forward ? -off : off), y2 = b.y + b.h / 2 + (forward ? -off : off);
+      const dx = Math.max(40, Math.abs(x2 - x1) / 2) * (forward ? 1 : -1);
+      return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+    }
+    const y1 = forward ? a.y + a.h : a.y, y2 = forward ? b.y : b.y + b.h;
+    const x1 = a.x + a.w / 2 + (forward ? -off : off), x2 = b.x + b.w / 2 + (forward ? -off : off);
+    const dy = Math.max(40, Math.abs(y2 - y1) / 2) * (forward ? 1 : -1);
+    return `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`;
+  }
+
+  // A forward edge that skips layers: arc over (LR) or beside (TB) any node standing in its way.
+  function pathAround(a, b, mids, lr) {
+    if (lr) {
+      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+      const dx = Math.max(40, (x2 - x1) / 4);
+      const lo = Math.min(y1, y2) - 14, hi = Math.max(y1, y2) + 14;
+      if (!mids.some((n) => n.y < hi && n.y + n.h > lo)) return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+      const peak = Math.min(...mids.map((n) => n.y)) - 34;
+      const Y = (8 * peak - y1 - y2) / 6;
+      return `M${x1},${y1} C${x1 + dx},${Y} ${x2 - dx},${Y} ${x2},${y2}`;
+    }
+    const x1 = a.x + a.w / 2, y1 = a.y + a.h, x2 = b.x + b.w / 2, y2 = b.y;
+    const dy = Math.max(40, (y2 - y1) / 4);
+    const lo = Math.min(x1, x2) - 14, hi = Math.max(x1, x2) + 14;
+    if (!mids.some((n) => n.x < hi && n.x + n.w > lo)) return `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`;
+    const side = Math.max(...mids.map((n) => n.x + n.w)) + 34;
+    const X = (8 * side - x1 - x2) / 6;
+    return `M${x1},${y1} C${X},${y1 + dy} ${X},${y2 - dy} ${x2},${y2}`;
   }
 
   function pathLR(a, b, isBack, same, index, bottom) {
@@ -348,8 +396,10 @@
         try {
           const len = ref.path.getTotalLength();
           ref.mid = ref.path.getPointAtLength(len / 2);
-          ref.label.setAttribute("x", ref.mid.x);
-          ref.label.setAttribute("y", ref.mid.y - 7);
+          const pos = ref.edge.labelPos;
+          ref.label.setAttribute("x", ref.mid.x + (pos === "left" ? -10 : pos === "right" ? 10 : 0));
+          ref.label.setAttribute("y", ref.mid.y + (pos === "below" ? 17 : pos === "left" || pos === "right" ? 4 : -7));
+          ref.label.setAttribute("text-anchor", pos === "left" ? "end" : pos === "right" ? "start" : "middle");
         } catch { /* path not rendered */ }
       }
       updateEdges();

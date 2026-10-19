@@ -40,7 +40,8 @@ pipx install git+https://github.com/kaih06-hub/VisualAgents.git
 ```
 
 or `uv tool install git+https://github.com/kaih06-hub/VisualAgents.git`, or `pip install` it into any environment.
-Add `[openai]` to the URL's package spec (`"visualagents[openai] @ git+https://…"`) for OpenAI / Ollama support.
+Claude support is built in. For Gemini or OpenAI (incl. Ollama / LM Studio), install the extra:
+`pipx install "visualagents[google] @ git+https://github.com/kaih06-hub/VisualAgents.git"` (`[openai]`, or `[all]`).
 
 ## Try it in 10 seconds (no API key)
 
@@ -127,17 +128,38 @@ SDK, `agents.add_trace_processor(visualagents.openai_agents_processor())`.
   LangGraph.js `addNode`/`addEdge`, and `new Agent({ name })` in JS/TS.
 - **LLM analysis** (when a key is available) reads the most agent-relevant files and returns each agent's role,
   description, tools, source location, log aliases and keywords, the handoff graph, entry/exit agents, and the
-  general step-by-step workflow. It uses Claude (`claude-opus-5-5`) by default with structured JSON output.
+  general step-by-step workflow, as schema-checked JSON.
+
+### Choosing the model that draws the map
+
+| Provider | Key | Default scan model | Default `--smart` model |
+|---|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` or `ant auth login` | `claude-opus-5-5` | `claude-opus-5-5` |
+| `openai` | `OPENAI_API_KEY` (+ `OPENAI_BASE_URL` for Ollama etc.) | `gpt-5` | `gpt-5` |
+| `google` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` (or Vertex AI) | `gemini-pro-latest` | `gemini-flash-lite-latest` |
 
 ```bash
-visualagents scan . --llm                       # require the LLM pass
-visualagents scan . --static                    # offline only
-visualagents scan . --provider openai --model gpt-5
+visualagents models                               # which providers have keys, and their defaults
+visualagents models --provider google             # every model your account can use
+visualagents scan . --provider google --model gemini-flash-latest
+visualagents run . --smart --narrate-model gemini-flash-lite-latest -- python app.py
 OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama visualagents scan . --provider openai --model qwen2.5-coder
 ```
 
-Keys are read from the environment, an `ant auth login` profile, or the project's `.env`. Before anything is sent
-to an LLM, `.env`/key/credential files are skipped and strings that look like API keys are redacted.
+To avoid passing flags every time, set `VISUALAGENTS_PROVIDER`, `VISUALAGENTS_MODEL` (scan) and
+`VISUALAGENTS_NARRATE_MODEL` (`--smart`) in your shell or the project's `.env`, next to the key:
+
+```bash
+# .env (keep it out of git)
+GEMINI_API_KEY=...
+VISUALAGENTS_PROVIDER=google
+VISUALAGENTS_MODEL=gemini-flash-latest
+```
+
+Without `--provider`, VisualAgents uses `VISUALAGENTS_PROVIDER`, else the first of Anthropic → OpenAI → Google
+that has a key, else offline static analysis. The dashboard's blueprint popup shows which model drew the map.
+Before anything is sent to an LLM, `.env`/key/credential files are skipped and strings that look like API keys
+are redacted.
 
 ## The dashboard
 
@@ -155,8 +177,9 @@ The server binds to `127.0.0.1` only. Ingest requests need a per-run token.
 
 ```
 visualagents demo     [--speed N]
-visualagents scan     [PROJECT] [--static | --llm] [--provider auto|anthropic|openai] [--model M] [--max-chars N] [--json] [-o FILE]
-visualagents run      [PROJECT] [--smart] [--narrate-model M] [--cwd DIR] [--no-instrument] [--no-pty] [--no-record] -- COMMAND…
+visualagents models   [PROJECT] [--provider anthropic|openai|google]
+visualagents scan     [PROJECT] [--static | --llm] [--provider auto|anthropic|openai|google] [--model M] [--max-chars N] [--json] [-o FILE]
+visualagents run      [PROJECT] [--smart] [--provider P] [--model M] [--narrate-model M] [--cwd DIR] [--no-instrument] [--no-pty] [--no-record] -- COMMAND…
 visualagents pipe     [PROJECT] [--quiet]
 visualagents watch    [PROJECT] --log FILE [--from-start] [--echo]
 visualagents replay   RECORDING [--project DIR] [--speed N] [--instant]
@@ -180,7 +203,7 @@ dashboard options: --port 7420 --host 127.0.0.1 --no-browser --blueprint FILE --
 ```bash
 git clone https://github.com/kaih06-hub/VisualAgents.git && cd VisualAgents
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev,openai]"
+pip install -e ".[dev,all]"
 pytest
 ```
 

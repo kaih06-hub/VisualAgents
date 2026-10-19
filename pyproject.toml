@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "VisualAgents contributors" }]
-keywords = ["agents", "multi-agent", "llm", "langgraph", "crewai", "autogen", "observability", "visualization"]
+keywords = ["agents", "multi-agent", "llm", "langgraph", "crewai", "autogen", "gemini", "claude", "observability", "visualization"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -23,6 +23,8 @@ dependencies = ["anthropic>=1.15"]
 
 [project.optional-dependencies]
 openai = ["openai>=1.40"]
+google = ["google-genai>=2.0"]
+all = ["openai>=1.40", "google-genai>=2.0"]
 dev = ["pytest>=8"]
 
 [project.scripts]

@@ -34,8 +34,9 @@ def scan_project(
     chosen = llm.detect_provider(provider)
     if chosen is None:
         if mode == "llm":
-            raise llm.LLMError("no LLM credentials found - set ANTHROPIC_API_KEY (or OPENAI_API_KEY)")
-        log("No ANTHROPIC_API_KEY / OPENAI_API_KEY found - using the static blueprint (add a key for a richer map).")
+            raise llm.LLMError("no LLM credentials found - set ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY")
+        log("No ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY found - using the static blueprint "
+            "(add a key for a richer map; see `visualagents models`).")
         return static
 
     source, included = pack(files, budget_chars=max_chars)
@@ -48,7 +49,7 @@ def scan_project(
         f"<source>\n{source}</source>\n\n"
         "Return the blueprint for this project."
     )
-    used_model = model or llm.DEFAULT_MODELS.get(chosen, "")
+    used_model = model or llm.default_model(chosen)
     log(f"Asking {chosen}:{used_model} to map the agents ({len(included)} file(s), {len(source):,} chars)…")
     try:
         raw = llm.complete_json(

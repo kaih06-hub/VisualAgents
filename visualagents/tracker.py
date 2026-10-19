@@ -131,6 +131,7 @@ class Tracker:
         self.edge_counts: dict[str, int] = {}
         self.dynamic_edges: set[tuple[str, str]] = set()
         self.step_index = -1
+        self.step_seen: set[str] = set()
         self.precise = False
         self.last_kind: str | None = None
         self.last_kind_at = 0.0
@@ -354,6 +355,7 @@ class Tracker:
         self.edge_counts = {}
         self.dynamic_edges = set()
         self.step_index = -1
+        self.step_seen = set()
 
     def _lookup(self, name: Any, create: bool) -> str | None:
         if not name:
@@ -430,11 +432,24 @@ class Tracker:
 
     def _advance_step(self, aid: str) -> None:
         steps = self.bp["steps"]
-        candidates = [i for i, s in enumerate(steps) if aid in s["agents"]]
-        if not candidates:
+        cands = [i for i, s in enumerate(steps) if aid in s["agents"]]
+        if not cands:
             return
-        forward = [i for i in candidates if i >= self.step_index]
-        self.step_index = forward[0] if forward else candidates[0]
+        cur = self.step_index
+        target = None
+        if cur in cands:
+            pass
+        elif cur < 0 or len(cands) == 1:
+            target = cands[0]  # first step, a forward jump, or looping back to an earlier phase
+        elif cur + 1 in cands and set(steps[cur]["agents"]) <= self.step_seen:
+            # agents that recur across steps (supervisors, routers, revisers) only move on once
+            # everyone in the current step has had their turn
+            target = cur + 1
+        if target is None:
+            self.step_seen.add(aid)
+        else:
+            self.step_index = target
+            self.step_seen = {aid}
 
     def _touch(self, aid: str | None, kind: str, text: str, tool: str | None = None) -> None:
         if not aid or aid not in self.agents:

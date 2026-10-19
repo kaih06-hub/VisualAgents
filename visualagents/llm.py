@@ -1,7 +1,11 @@
 """LLM access for VisualAgents: codebase -> blueprint, and (optionally) live narration.
 
-Claude is the default provider (official `anthropic` SDK). OpenAI or any OpenAI-compatible
-server (Ollama, LM Studio, vLLM via OPENAI_BASE_URL) works with `pip install "visualagents[openai]"`.
+Providers (pick with --provider / --model, or VISUALAGENTS_PROVIDER / VISUALAGENTS_MODEL):
+- anthropic: Claude via the official `anthropic` SDK (installed by default)
+- openai:    OpenAI or any OpenAI-compatible server (Ollama, LM Studio, vLLM via OPENAI_BASE_URL);
+             `pip install "visualagents[openai]"`
+- google:    Gemini via the official `google-genai` SDK (GEMINI_API_KEY, or Vertex AI);
+             `pip install "visualagents[google]"`
 """
 
 from __future__ import annotations
@@ -11,7 +15,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-5"}
+PROVIDERS = ("anthropic", "openai", "google")
+# Default model for reading the codebase (quality matters) and for --smart narration (runs every few seconds).
+DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-5", "google": "gemini-pro-latest"}
+NARRATE_MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-5", "google": "gemini-flash-lite-latest"}
+PROVIDER_LABELS = {"anthropic": "Anthropic Claude", "openai": "OpenAI / compatible", "google": "Google Gemini"}
+KEY_VARS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"),
+}
+_DOTENV_VARS = {
+    *(v for vs in KEY_VARS.values() for v in vs), "ANTHROPIC_BASE_URL", "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION", "VISUALAGENTS_PROVIDER", "VISUALAGENTS_MODEL", "VISUALAGENTS_NARRATE_MODEL",
+}
 # Models that accept the server-side refusal fallback (beta server-side-fallback-2026-07-01).
 _FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
 _NO_EFFORT = ("claude-3", "claude-haiku-4", "claude-sonnet-4-5", "claude-sonnet-4-0", "claude-opus-4-0", "claude-opus-4-1")
@@ -22,8 +39,7 @@ class LLMError(RuntimeError):
 
 
 def load_dotenv_keys(project: Path) -> None:
-    """Pick up provider keys from the project's .env if they aren't already in the environment."""
-    wanted = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"}
+    """Pick up provider keys and model choices from the project's .env if they aren't already set."""
     for candidate in (Path(project) / ".env", Path.cwd() / ".env"):
         try:
             lines = candidate.read_text(encoding="utf-8").splitlines()
@@ -37,21 +53,37 @@ def load_dotenv_keys(project: Path) -> None:
                 continue
             k, v = line.split("=", 1)
             k, v = k.strip(), v.strip().strip("'\"")
-            if k in wanted and v and not os.environ.get(k):
+            if k in _DOTENV_VARS and v and not os.environ.get(k):
                 os.environ[k] = v
 
 
-def detect_provider(preferred: str = "auto") -> str | None:
-    if preferred and preferred != "auto":
-        return preferred
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return "anthropic"
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_BASE_URL"):
-        return "openai"
+def has_credentials(provider: str) -> bool:
+    if any(os.environ.get(v) for v in KEY_VARS.get(provider, ())):
+        return True
     # `ant auth login` stores a profile the Anthropic SDK picks up without any env var
-    if os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").is_dir():
-        return "anthropic"
-    return None
+    return provider == "anthropic" and bool(
+        os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").is_dir()
+    )
+
+
+def detect_provider(preferred: str = "auto") -> str | None:
+    """--provider wins, then VISUALAGENTS_PROVIDER, then the first provider with credentials."""
+    for choice in (preferred, os.environ.get("VISUALAGENTS_PROVIDER", "")):
+        if choice and choice != "auto":
+            if choice not in PROVIDERS:
+                raise LLMError(f"unknown provider {choice!r} - use one of: {', '.join(PROVIDERS)}")
+            return choice
+    for provider in ("anthropic", "openai", "google"):
+        if any(os.environ.get(v) for v in KEY_VARS[provider]):
+            return provider
+    return "anthropic" if has_credentials("anthropic") else None
+
+
+def default_model(provider: str, purpose: str = "scan") -> str:
+    """--model is handled by callers; this is the env override or the provider's default."""
+    if purpose == "narrate":
+        return os.environ.get("VISUALAGENTS_NARRATE_MODEL") or NARRATE_MODELS.get(provider, "")
+    return os.environ.get("VISUALAGENTS_MODEL") or DEFAULT_MODELS.get(provider, "")
 
 
 def complete_json(
@@ -64,12 +96,14 @@ def complete_json(
     effort: str = "high",
     max_tokens: int = 64000,
 ) -> dict[str, Any]:
-    model = model or DEFAULT_MODELS.get(provider)
+    model = model or default_model(provider)
     if provider == "anthropic":
         return _anthropic_json(model, system, prompt, schema, effort, max_tokens)
     if provider == "openai":
         return _openai_json(model, system, prompt, schema)
-    raise LLMError(f"unknown provider {provider!r} (use 'anthropic' or 'openai')")
+    if provider == "google":
+        return _google_json(model, system, prompt, schema, max_tokens)
+    raise LLMError(f"unknown provider {provider!r} - use one of: {', '.join(PROVIDERS)}")
 
 
 def _anthropic_json(model: str, system: str, prompt: str, schema: dict[str, Any], effort: str, max_tokens: int) -> dict[str, Any]:
@@ -155,6 +189,85 @@ def _openai_json(model: str, system: str, prompt: str, schema: dict[str, Any]) -
         return json.loads(choice.message.content or "")
     except ValueError as exc:
         raise LLMError("the model returned invalid JSON") from exc
+
+
+def _google_json(model: str, system: str, prompt: str, schema: dict[str, Any], max_tokens: int) -> dict[str, Any]:
+    try:
+        from google import genai
+        from google.genai import errors, types
+    except ImportError as exc:
+        raise LLMError('Gemini support needs: pip install "visualagents[google]"') from exc
+
+    # Reads GEMINI_API_KEY / GOOGLE_API_KEY, or Vertex AI via GOOGLE_GENAI_USE_VERTEXAI + project/location.
+    # Retry rate limits and "high demand" 5xx responses with backoff, like the Anthropic/OpenAI SDKs do.
+    client = genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(
+        attempts=4, initial_delay=2.0, max_delay=20.0, http_status_codes=[408, 429, 500, 502, 503, 504],
+    )))
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        response_mime_type="application/json",
+        response_json_schema=schema,
+        max_output_tokens=min(max_tokens, 65536),
+    )
+    try:
+        resp = client.models.generate_content(model=model, contents=prompt, config=config)
+    except errors.ClientError as exc:
+        if exc.code in (401, 403):
+            raise LLMError("Google rejected the credentials - set GEMINI_API_KEY") from exc
+        if exc.code == 404:
+            raise LLMError(f"model {model!r} not found - see `visualagents models --provider google`") from exc
+        if exc.code == 429:
+            raise LLMError("Gemini rate limit or quota hit - try again shortly") from exc
+        raise LLMError(f"Gemini API error {exc.code}: {exc.message}") from exc
+    except errors.ServerError as exc:
+        raise LLMError(f"Gemini is unavailable right now ({exc.code}: {exc.message}) - retry, or pick another "
+                       f"model with --model (see `visualagents models --provider google`)") from exc
+    except errors.APIError as exc:
+        raise LLMError(f"Gemini API error {exc.code}: {exc.message}") from exc
+    except OSError as exc:
+        raise LLMError("could not reach the Gemini API - check your network") from exc
+
+    feedback = getattr(resp, "prompt_feedback", None)
+    if feedback is not None and getattr(feedback, "block_reason", None):
+        raise LLMError("the model declined this request")
+    candidate = resp.candidates[0] if resp.candidates else None
+    finish = str(getattr(candidate, "finish_reason", "") or "")
+    if "MAX_TOKENS" in finish:
+        raise LLMError("the model ran out of output tokens - try a smaller --max-chars")
+    if any(r in finish for r in ("SAFETY", "PROHIBITED", "BLOCKLIST", "SPII", "RECITATION")):
+        raise LLMError("the model declined this request")
+    try:
+        return json.loads(resp.text or "")
+    except ValueError as exc:
+        raise LLMError("the model returned invalid JSON") from exc
+
+
+def list_models(provider: str) -> list[str]:
+    """Model ids the configured account can use (best effort; listing models is free)."""
+    try:
+        if provider == "anthropic":
+            import anthropic
+
+            return [m.id for m in anthropic.Anthropic().models.list()]
+        if provider == "openai":
+            import openai
+
+            return sorted(m.id for m in openai.OpenAI().models.list())
+        if provider == "google":
+            from google import genai
+
+            client = genai.Client()  # keep a reference: the pager needs the client open
+            out = []
+            for m in client.models.list():
+                actions = getattr(m, "supported_actions", None) or []
+                if "generateContent" in actions and "gemini" in (m.name or ""):
+                    out.append(m.name.split("/")[-1])
+            return out
+    except ImportError as exc:
+        raise LLMError(f'the {provider} SDK is not installed: pip install "visualagents[{provider}]"') from exc
+    except Exception as exc:  # each SDK has its own error types; listing is informational only
+        raise LLMError(f"could not list {provider} models: {exc}") from exc
+    raise LLMError(f"unknown provider {provider!r}")
 
 
 # -- prompts ----------------------------------------------------------------

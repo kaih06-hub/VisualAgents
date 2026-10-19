@@ -114,3 +114,86 @@ def test_run_argument_splitting(tmp_path):
     assert cli._split_run_argv(["run", "--port", "9000", "--", "node", "agent.js"]) == (
         ["run", "--port", "9000"], ["node", "agent.js"])
     assert cli._split_run_argv(["run", "python", "x.py"]) == (["run"], ["python", "x.py"])
+
+
+def _fake_google(monkeypatch, payload, captured, finish="STOP"):
+    from google import genai
+
+    resp = types.SimpleNamespace(
+        text=json.dumps(payload),
+        prompt_feedback=None,
+        candidates=[types.SimpleNamespace(finish_reason=finish)],
+    )
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config):
+            captured.update(model=model, contents=contents, config=config)
+            return resp
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            captured["client_kwargs"] = kw
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+
+
+def _clear_provider_env(monkeypatch):
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL", "GEMINI_API_KEY",
+              "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "ANTHROPIC_PROFILE", "VISUALAGENTS_PROVIDER",
+              "VISUALAGENTS_MODEL", "VISUALAGENTS_NARRATE_MODEL"):
+        monkeypatch.setenv(k, "")  # empty = unset for VisualAgents, and monkeypatch restores it afterwards
+
+
+def test_google_provider_sends_json_schema(monkeypatch):
+    pytest.importorskip("google.genai")
+    captured = {}
+    _fake_google(monkeypatch, {"agent": "writer", "activity": "drafting"}, captured)
+    out = llm.complete_json(provider="google", model="gemini-flash-lite-latest", system="sys", prompt="p",
+                            schema=llm.NARRATE_SCHEMA, effort="low", max_tokens=4000)
+    assert out == {"agent": "writer", "activity": "drafting"}
+    cfg = captured["config"]
+    assert captured["model"] == "gemini-flash-lite-latest"
+    assert cfg.response_mime_type == "application/json"
+    assert cfg.response_json_schema == llm.NARRATE_SCHEMA
+    assert cfg.system_instruction == "sys"
+    assert 503 in captured["client_kwargs"]["http_options"].retry_options.http_status_codes
+
+
+def test_google_truncation_and_safety_raise(monkeypatch):
+    pytest.importorskip("google.genai")
+    for finish in ("FinishReason.MAX_TOKENS", "FinishReason.SAFETY"):
+        _fake_google(monkeypatch, {}, {}, finish=finish)
+        with pytest.raises(llm.LLMError):
+            llm.complete_json(provider="google", model="m", system="s", prompt="p", schema={})
+
+
+def test_provider_and_model_selection(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(llm.Path, "home", lambda: Path("/nonexistent-home"))
+    assert llm.detect_provider("auto") is None
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    assert llm.detect_provider("auto") == "google"
+    assert llm.default_model("google") == "gemini-pro-latest"
+    assert llm.default_model("google", "narrate") == "gemini-flash-lite-latest"
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    assert llm.detect_provider("auto") == "openai"          # first provider with a key
+    monkeypatch.setenv("VISUALAGENTS_PROVIDER", "google")   # explicit default wins
+    monkeypatch.setenv("VISUALAGENTS_MODEL", "gemini-flash-latest")
+    assert llm.detect_provider("auto") == "google"
+    assert llm.default_model("google") == "gemini-flash-latest"
+    assert llm.detect_provider("anthropic") == "anthropic"  # --provider wins over everything
+    with pytest.raises(llm.LLMError):
+        llm.detect_provider("mistral")
+
+
+def test_dotenv_supplies_keys_and_model_choice(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY='abc'\nexport VISUALAGENTS_MODEL=gemini-flash-latest\nUNRELATED=1\n")
+    monkeypatch.chdir(tmp_path)
+    llm.load_dotenv_keys(tmp_path)
+    import os
+
+    assert os.environ["GEMINI_API_KEY"] == "abc"
+    assert os.environ["VISUALAGENTS_MODEL"] == "gemini-flash-latest"
+    assert "UNRELATED" not in os.environ

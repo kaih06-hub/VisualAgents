@@ -17,7 +17,7 @@ from . import __version__
 from . import blueprint as bpmod
 from . import termui
 from .hub import Hub
-from .llm import LLMError, detect_provider, load_dotenv_keys
+from .llm import PROVIDERS, LLMError, detect_provider, load_dotenv_keys
 from .server import Server
 
 DEFAULT_PORT = 7420
@@ -45,8 +45,10 @@ def _scan_opts(p: argparse.ArgumentParser, *, standalone: bool = False) -> None:
     g = p.add_mutually_exclusive_group()
     g.add_argument("--static", action="store_true", help="offline analysis only (no LLM)")
     g.add_argument("--llm", action="store_true", help="require an LLM pass (fail if no key is configured)")
-    p.add_argument("--provider", default="auto", choices=["auto", "anthropic", "openai"], help="LLM provider")
-    p.add_argument("--model", help="model for the code scan (default: claude-opus-5-5 / gpt-5)")
+    p.add_argument("--provider", default="auto", choices=["auto", *PROVIDERS],
+                   help="LLM provider (default: $VISUALAGENTS_PROVIDER, else whichever has a key)")
+    p.add_argument("--model", help="model that reads the code and draws the map (default: $VISUALAGENTS_MODEL, "
+                                   "else claude-opus-5-5 / gpt-5 / gemini-pro-latest) - see `visualagents models`")
     if standalone:
         p.add_argument("--max-chars", type=int, default=180_000, help="source budget sent to the LLM")
     else:
@@ -85,7 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     _scan_opts(p)
     p.add_argument("--cwd", type=Path, help="working directory for the command (default: the project folder)")
     p.add_argument("--smart", action="store_true", help="also use an LLM to narrate what each agent is doing")
-    p.add_argument("--narrate-model", help="model for --smart narration (default: same as the scan default)")
+    p.add_argument("--narrate-model", help="model for --smart narration (default: $VISUALAGENTS_NARRATE_MODEL, "
+                                           "else the provider's fast default - see `visualagents models`)")
     p.add_argument("--interval", type=float, default=4.0, help="seconds between --smart narrations")
     p.add_argument("--no-instrument", action="store_true", help="don't auto-hook LangChain/LangGraph/OpenAI Agents")
     p.add_argument("--no-pty", action="store_true", help="use plain pipes instead of a pseudo-terminal")
@@ -113,6 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--instant", action="store_true", help="jump straight to the end state")
     _server_opts(p)
+
+    p = sub.add_parser("models", help="show LLM providers, which have keys, and the models you can pick")
+    p.add_argument("project", nargs="?", default=".", type=Path, help="also read keys from this project's .env")
+    p.add_argument("--provider", choices=list(PROVIDERS), help="list the models this provider's account can use")
 
     p = sub.add_parser("demo", help="a simulated 4-agent research crew - no API key needed")
     p.add_argument("--speed", type=float, default=1.0, help="2 = twice as fast")
@@ -152,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {
             "scan": cmd_scan, "blueprint": cmd_blueprint, "show": cmd_show, "run": cmd_run, "pipe": cmd_pipe,
-            "watch": cmd_watch, "replay": cmd_replay, "demo": cmd_demo,
+            "watch": cmd_watch, "replay": cmd_replay, "demo": cmd_demo, "models": cmd_models,
         }[args.cmd](args, command)
     except LLMError as exc:
         termui.error(str(exc))
@@ -275,12 +282,15 @@ def cmd_run(args, command: list[str]) -> int:
         load_dotenv_keys(project)
         provider = detect_provider(args.provider)
         if provider is None:
-            termui.info("--smart needs ANTHROPIC_API_KEY or OPENAI_API_KEY - continuing without narration.")
+            termui.info("--smart needs ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY - continuing without narration.")
         else:
             from .narrator import Narrator
 
-            narrator = Narrator(hub, provider=provider, model=args.narrate_model or args.model,
-                                interval=args.interval).start()
+            from .llm import default_model
+
+            model = args.narrate_model or default_model(provider, "narrate")
+            termui.info(f"Smart narration: {provider}:{model} every {args.interval:g}s while output changes.")
+            narrator = Narrator(hub, provider=provider, model=model, interval=args.interval).start()
 
     install_sigterm_handler()
     code = run_command(command, hub, cwd=(args.cwd or project).resolve(), server_url=server.url,
@@ -353,6 +363,32 @@ def cmd_replay(args, _command) -> int:
     except KeyboardInterrupt:
         stop.set()
     server.stop()
+    return 0
+
+
+def cmd_models(args, _command) -> int:
+    from . import llm
+
+    load_dotenv_keys(args.project.resolve())
+    if args.provider:
+        models = llm.list_models(args.provider)
+        print("\n".join(models) if models else f"(no models returned for {args.provider})")
+        return 0
+    active = detect_provider("auto")
+    print(f"\n{termui.bold('LLM providers')}  (the provider + model that read your code and draw the map)\n")
+    for p in PROVIDERS:
+        mark = termui.good("● key found") if llm.has_credentials(p) else termui.dim("○ no key")
+        chosen = termui.accent("  ← used by default") if p == active else ""
+        print(f"  {termui.bold(f'{p:<10}')} {llm.PROVIDER_LABELS[p]:<22} {mark}{chosen}")
+        print(f"             scan: {llm.default_model(p)}   --smart: {llm.default_model(p, 'narrate')}")
+        print(f"             {termui.dim('keys: ' + ' / '.join(llm.KEY_VARS[p]))}")
+    print(f"""
+{termui.bold('Choose per command')}   visualagents scan . --provider google --model gemini-flash-latest
+                     visualagents run . --smart --provider google --narrate-model gemini-flash-lite-latest -- python app.py
+{termui.bold('Or set defaults')}      VISUALAGENTS_PROVIDER, VISUALAGENTS_MODEL, VISUALAGENTS_NARRATE_MODEL
+                     (in your shell or the project's .env)
+{termui.bold('See what you can use')} visualagents models --provider google
+""")
     return 0
 
 
