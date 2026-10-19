@@ -71,6 +71,8 @@
     projectId: new URLSearchParams(location.search).get("project") || "", projects: [],
   };
 
+  // ?t=SECONDS opens the run rewound to that moment; ?theme=light|dark; ?popup=0|1 (shareable views)
+  const PARAMS = new URLSearchParams(location.search);
   const q = (path) => (S.projectId ? `${path}${path.includes("?") ? "&" : "?"}project=${encodeURIComponent(S.projectId)}` : path);
 
   const wrap = $("#canvas-wrap"), canvas = $("#canvas"), edgesSvg = $("#edges"), nodesEl = $("#nodes");
@@ -1115,6 +1117,7 @@
     if (!S.autoScroll || S.stickRaf || S.scrubT != null) return;
     S.stickRaf = requestAnimationFrame(() => {
       S.stickRaf = 0;
+      if (S.scrubT != null) return; // rewound meanwhile: stay at that moment
       S.programmaticScroll = true;
       feedEl.scrollTop = feedEl.scrollHeight;
     });
@@ -1594,6 +1597,8 @@
   }
 
   function maybeAutoOpenBlueprint() {
+    if (PARAMS.get("popup") === "0") return;
+    if (PARAMS.get("popup") === "1") return openModal(false);
     const key = `va-bp-seen:${S.bp.project}`;
     const mode = S.meta.mode;
     if (mode === "blueprint" || mode === "demo" || mode === "setup" || !store.get(key)) {
@@ -1690,7 +1695,7 @@
 
   // ---------------------------------------------------------------- wiring
   function bindUI() {
-    applyTheme(store.get("va-theme") || "auto");
+    applyTheme(["light", "dark"].includes(PARAMS.get("theme")) ? PARAMS.get("theme") : store.get("va-theme") || "auto");
     $("#btn-theme").onclick = () => {
       const cur = store.get("va-theme") || "auto";
       applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
@@ -1730,7 +1735,16 @@
 
   bindUI();
   loadState()
-    .then(() => { refreshProjects(); connect(); })
+    .then(() => {
+      refreshProjects();
+      if (PARAMS.get("live") !== "0") connect(); // ?live=0: a still snapshot (screenshots, embeds)
+      const t = parseFloat(PARAMS.get("t"));
+      if (Number.isFinite(t) && S.st.run.started) {
+        S.scrubT = S.st.run.started + Math.max(0, t);
+        renderState();
+        syncFeedToTime();
+      }
+    })
     .catch((err) => {
       console.error(err);
       setRunStatus(true);

@@ -715,7 +715,7 @@ def cmd_demo(args, _command) -> int:
         import time
 
         time.sleep(1.5)  # give the browser a moment so the run starts on screen
-    code = run_command(command, hub, cwd=demo_dir, server_url=server.url, instrument=False)
+    code = run_command(command, hub, cwd=demo_dir, server_url=server.url, instrument=False, label="visualagents demo")
     if not args.exit:
         _hold(server, "Demo finished.")
     server.stop()

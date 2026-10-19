@@ -116,12 +116,13 @@ def run_command(
     instrument: bool = True,
     use_pty: bool | None = None,
     echo: bool = True,
+    label: str | None = None,
 ) -> int:
     """Run `command`, mirror its output to this terminal, and feed every line to the hub."""
     if use_pty is None:
         use_pty = os.name == "posix" and sys.stdout.isatty()
     env = build_env(server_url, hub.token, instrument=instrument, use_pty=use_pty)
-    hub.run_started(shlex.join(command))
+    hub.run_started(label or shlex.join(command))
     echo_fn = _terminal_echo if echo else None
     try:
         if use_pty:
