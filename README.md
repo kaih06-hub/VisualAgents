@@ -1,0 +1,192 @@
+# VisualAgents
+
+**A live map of which agent in a multi-agent AI system is doing what — built from its chain of thought.**
+
+Multi-agent apps (LangGraph, CrewAI, AutoGen, OpenAI Agents SDK, Swarm, Google ADK, smolagents, LlamaIndex, or your own
+framework) usually show you one long stream of thoughts and tool calls. You can't tell which specialist is
+working, where the request is in the workflow, or why it looped back.
+
+VisualAgents fixes that from the terminal:
+
+1. **Reads the codebase** (static analysis + an LLM pass) and works out how many agents there are, what each
+   one does, which tools it owns and how work is handed between them — the **blueprint**.
+2. **Runs your agent** (or reads its log / piped output) and maps every line of chain-of-thought onto the
+   blueprint as it happens.
+3. **Opens a local dashboard** — a live graph that lights up the agent that is working, animates each
+   handoff, shows what it's thinking right now, which workflow step you're on, and the exact path taken.
+
+```
+ ┌ VisualAgents · research_crew ─────────────────────────────── ● Running 01:15 ┐
+ │ ✓ Plan ─ ✓ Research ─ ③ Draft ─ ④ Review                                      │
+ ├──────────────────────────────────────────────────────┬────────────────────────┤
+ │                                                      │ WORKING NOW            │
+ │  START ─▶ [Planner ✓] ─▶ [Researcher ✓] ─▶ [Writer ●]─▶ [Critic] ─▶ END       │
+ │                                        ┌──────────┐ ◀─ revise ─┘  │ ● Writer  │
+ │                                        │ Thought: │                │ Drafting  │
+ │                                        │ drafting │                │ section 2 │
+ │                                        └──────────┘                ├───────────┤
+ │                                                      │ Live chain of thought  │
+ ├──────────────────────────────────────────────────────┴────────────────────────┤
+ │ PATH  Start › Planner 18s › Researcher 51s › Writer 9s                         │
+ └───────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Install
+
+Requires Python 3.10+.
+
+```bash
+pipx install git+https://github.com/kaih06-hub/VisualAgents.git
+```
+
+or `uv tool install git+https://github.com/kaih06-hub/VisualAgents.git`, or `pip install` it into any environment.
+Add `[openai]` to the URL's package spec (`"visualagents[openai] @ git+https://…"`) for OpenAI / Ollama support.
+
+## Try it in 10 seconds (no API key)
+
+```bash
+visualagents demo
+```
+
+A simulated four-agent research crew (planner → researcher → writer ⇄ critic) runs in your terminal while the
+dashboard maps it live.
+
+## Use it on your own agents
+
+```bash
+# 1. Map the agents in a project (uses Claude if ANTHROPIC_API_KEY is set, otherwise offline static analysis)
+visualagents scan ./my-agent-app
+
+# 2. Run your agent through VisualAgents - everything after `--` is your normal command
+visualagents run ./my-agent-app -- python main.py "What changed in EV batteries this year?"
+```
+
+`run` opens the dashboard, passes your terminal through untouched (prompts like `input("Query: ")` still work),
+and keeps the dashboard open after the run so you can inspect it. Other ways to feed it:
+
+```bash
+python main.py 2>&1 | visualagents pipe ./my-agent-app      # output you already produce
+visualagents watch ./my-agent-app --log logs/agent.log        # follow a log file (tail -F)
+visualagents replay ./my-agent-app/.visualagents/runs/20261019-091542.jsonl --speed 4
+visualagents show ./my-agent-app                              # just the blueprint
+visualagents blueprint ./my-agent-app                         # print the blueprint in the terminal
+```
+
+Every `run`/`pipe`/`watch` is recorded under `.visualagents/runs/` and can be replayed later — even against an
+improved blueprint (`replay … --project ./my-agent-app`).
+
+## How it attributes work to agents
+
+VisualAgents combines three sources, from most to least precise:
+
+| Source | When | What you get |
+|---|---|---|
+| **Auto-instrumentation** | `visualagents run` with a Python app using LangChain / LangGraph or the OpenAI Agents SDK | Exact node/agent boundaries, LLM replies as thoughts, every tool call — no code changes. Injected via `PYTHONPATH`; disable with `--no-instrument`. |
+| **Console patterns** | Always | Recognises CrewAI (`# Agent: …`, rich panels), AutoGen (`coder (to critic):`, `---------- coder ----------`), LangGraph stream output (`Update from node …`, `{'node': …}`), ReAct (`Thought:` / `Action:` / `Observation:` / `Final Answer:`), handoff phrases (`Handing off to Writer`, `transfer_to_billing`), `[Agent] …` prefixes, and tool names owned by a single agent. |
+| **LLM narration** (`--smart`) | Optional | Every few seconds an LLM reads the latest output and says which agent is working and summarises what it's doing in one line. |
+
+Agents the blueprint missed but that show up at runtime are added to the map (dashed), and handoffs that
+weren't in the blueprint are drawn as dotted "observed" edges.
+
+### Instrument anything yourself
+
+From any language, print a line to stdout/stderr:
+
+```
+@@visualagents {"type": "agent_start", "agent": "researcher", "text": "find sources"}
+```
+
+From Python:
+
+```python
+from visualagents import agent, emit, handoff, track
+
+with agent("researcher", task="find sources"):
+    emit("thought", "researcher", "Start with peer-reviewed numbers")
+    emit("tool_start", "researcher", "solid-state battery Wh/kg", tool="web_search")
+handoff("researcher", "writer", "findings ready")
+
+@track("critic")          # the whole function is the critic's turn
+def review(draft): ...
+```
+
+Event types: `agent_start`, `agent_end`, `thought`, `tool_start`, `tool_end`, `handoff`, `output`, `log`, `error`.
+Under `visualagents run` the stdlib-only runtime is importable even if VisualAgents isn't installed in your
+app's environment: `from visualagents_runtime import agent, emit`. Marker lines are hidden from your terminal.
+For LangChain without `run`, pass `visualagents.langchain_handler()` in `callbacks=[…]`; for the OpenAI Agents
+SDK, `agents.add_trace_processor(visualagents.openai_agents_processor())`.
+
+## The blueprint
+
+`visualagents scan` writes `.visualagents/blueprint.json` in the project (commit it or hand-edit it):
+
+- **Static analysis** (offline, instant) understands LangGraph `add_node` / `add_edge` /
+  `add_conditional_edges` / `Command(goto=…)`, CrewAI `Agent`/`Task`/`Crew` and `config/agents.yaml` +
+  `tasks.yaml`, AutoGen agents and group chats, OpenAI Agents SDK `handoffs` and `as_tool`, Swarm
+  `transfer_to_*` functions, Google ADK `sub_agents`, smolagents `managed_agents`, LlamaIndex `AgentWorkflow`,
+  LangGraph.js `addNode`/`addEdge`, and `new Agent({ name })` in JS/TS.
+- **LLM analysis** (when a key is available) reads the most agent-relevant files and returns each agent's role,
+  description, tools, source location, log aliases and keywords, the handoff graph, entry/exit agents, and the
+  general step-by-step workflow. It uses Claude (`claude-opus-5-5`) by default with structured JSON output.
+
+```bash
+visualagents scan . --llm                       # require the LLM pass
+visualagents scan . --static                    # offline only
+visualagents scan . --provider openai --model gpt-5
+OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama visualagents scan . --provider openai --model qwen2.5-coder
+```
+
+Keys are read from the environment, an `ant auth login` profile, or the project's `.env`. Before anything is sent
+to an LLM, `.env`/key/credential files are skipped and strings that look like API keys are redacted.
+
+## The dashboard
+
+- **Graph** — agents laid out by workflow order (left→right, or top→bottom on narrow screens); the active agent
+  glows with a thought bubble showing what it's doing; handoffs animate along the edges with traversal counts.
+- **Steps** — the blueprint's phases, checked off as the run moves through them.
+- **Live chain of thought** — every thought, tool call, result and answer, colour-coded by agent and filterable.
+- **Path taken** — the exact sequence of agents with time spent in each, including loops.
+- **Blueprint popup** (`B`) — summary, steps, agents with roles/tools/source, and every handoff.
+- Click an agent for its details and its own chain of thought. `F` fits the graph; light/dark/auto theme.
+
+The server binds to `127.0.0.1` only. Ingest requests need a per-run token.
+
+## CLI reference
+
+```
+visualagents demo     [--speed N]
+visualagents scan     [PROJECT] [--static | --llm] [--provider auto|anthropic|openai] [--model M] [--max-chars N] [--json] [-o FILE]
+visualagents run      [PROJECT] [--smart] [--narrate-model M] [--cwd DIR] [--no-instrument] [--no-pty] [--no-record] -- COMMAND…
+visualagents pipe     [PROJECT] [--quiet]
+visualagents watch    [PROJECT] --log FILE [--from-start] [--echo]
+visualagents replay   RECORDING [--project DIR] [--speed N] [--instant]
+visualagents show     [PROJECT]
+visualagents blueprint [PROJECT] [--json]
+
+dashboard options: --port 7420 --host 127.0.0.1 --no-browser --blueprint FILE --exit --rescan
+```
+
+`vagents` is a short alias for `visualagents`.
+
+## Examples
+
+- [`examples/langgraph_supervisor`](examples/langgraph_supervisor) — a LangGraph supervisor team that runs
+  offline (`pip install langgraph`): `visualagents run examples/langgraph_supervisor -- python app.py`
+- [`examples/crewai_project`](examples/crewai_project) — the standard CrewAI template (YAML agents & tasks).
+- [`examples/manual_sdk`](examples/manual_sdk) — a hand-rolled multi-agent loop instrumented with `emit`.
+
+## Development
+
+```bash
+git clone https://github.com/kaih06-hub/VisualAgents.git && cd VisualAgents
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev,openai]"
+pytest
+```
+
+The dashboard is plain HTML/CSS/JS in `visualagents/web/` (no build step). New console formats go in
+`visualagents/patterns.py`; new static detectors in `visualagents/static_scan.py`.
+
+## License
+
+MIT

@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "project": "research_crew (demo)",
+  "framework": "crewai-style",
+  "summary": "A four-agent research crew. The Planner splits the user's question into sub-questions, the Researcher gathers and verifies sources with web search and paper reading, the Writer drafts a cited report, and the Critic fact-checks it - sending it back to the Writer until it passes review.",
+  "generated_by": "the bundled demo blueprint",
+  "generated_at": "",
+  "agents": [
+    {
+      "id": "planner",
+      "name": "Planner",
+      "role": "Research strategist",
+      "description": "Breaks the user's question into independent sub-questions and a research plan.",
+      "tools": ["outline_builder"],
+      "file": "research_crew.py",
+      "line": 37,
+      "aliases": ["planner", "Research strategist"],
+      "keywords": ["plan", "sub-questions", "outline"]
+    },
+    {
+      "id": "researcher",
+      "name": "Researcher",
+      "role": "Senior research analyst",
+      "description": "Searches the web and reads papers to find and verify evidence for each sub-question.",
+      "tools": ["web_search", "read_paper"],
+      "file": "research_crew.py",
+      "line": 39,
+      "aliases": ["researcher", "Senior research analyst"],
+      "keywords": ["sources", "search", "results", "paper"]
+    },
+    {
+      "id": "writer",
+      "name": "Writer",
+      "role": "Technical writer",
+      "description": "Turns the findings into a clear, structured report with citations; revises after review.",
+      "tools": [],
+      "file": "research_crew.py",
+      "line": 41,
+      "aliases": ["writer", "Technical writer"],
+      "keywords": ["draft", "section", "revising"]
+    },
+    {
+      "id": "critic",
+      "name": "Critic",
+      "role": "Reviewer",
+      "description": "Fact-checks every claim in the draft and either approves it or sends it back with fixes.",
+      "tools": ["fact_check"],
+      "file": "research_crew.py",
+      "line": 42,
+      "aliases": ["critic", "Reviewer"],
+      "keywords": ["claim", "unsupported", "approved", "revise"]
+    }
+  ],
+  "edges": [
+    {"from": "planner", "to": "researcher", "label": "research plan", "conditional": false},
+    {"from": "researcher", "to": "writer", "label": "findings + sources", "conditional": false},
+    {"from": "writer", "to": "critic", "label": "draft", "conditional": false},
+    {"from": "critic", "to": "writer", "label": "revise", "conditional": true}
+  ],
+  "entry": ["planner"],
+  "exits": ["critic"],
+  "steps": [
+    {"order": 1, "title": "Plan", "agents": ["planner"], "description": "Split the question into sub-questions."},
+    {"order": 2, "title": "Research", "agents": ["researcher"], "description": "Gather and verify sources for each sub-question."},
+    {"order": 3, "title": "Draft", "agents": ["writer"], "description": "Write a cited report from the findings."},
+    {"order": 4, "title": "Review", "agents": ["critic"], "description": "Fact-check; loop back to the Writer until approved."}
+  ]
+}

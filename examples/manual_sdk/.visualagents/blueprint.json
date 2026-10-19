@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "project": "support_desk (manual SDK example)",
+  "framework": "custom",
+  "summary": "A support desk where Triage classifies the customer's question, Billing investigates charges, and Refunds issues money back when needed.",
+  "generated_by": "hand-written",
+  "generated_at": "",
+  "agents": [
+    {"id": "triage", "name": "Triage", "role": "Front desk", "description": "Reads the customer's question and routes it to the right specialist.", "tools": [], "file": "app.py", "line": 17, "aliases": [], "keywords": []},
+    {"id": "billing", "name": "Billing", "role": "Billing specialist", "description": "Looks up invoices and explains or diagnoses charges.", "tools": ["lookup_invoices"], "file": "app.py", "line": 25, "aliases": [], "keywords": []},
+    {"id": "refunds", "name": "Refunds", "role": "Refund processor", "description": "Issues refunds for confirmed billing errors.", "tools": ["issue_refund"], "file": "app.py", "line": 37, "aliases": [], "keywords": []}
+  ],
+  "edges": [
+    {"from": "triage", "to": "billing", "label": "billing question", "conditional": true},
+    {"from": "billing", "to": "refunds", "label": "refund needed", "conditional": true}
+  ],
+  "entry": ["triage"],
+  "exits": ["billing", "refunds"],
+  "steps": [
+    {"order": 1, "title": "Triage", "agents": ["triage"], "description": "Classify the question."},
+    {"order": 2, "title": "Investigate", "agents": ["billing"], "description": "Find the relevant invoices."},
+    {"order": 3, "title": "Resolve", "agents": ["refunds"], "description": "Refund if a charge was wrong."}
+  ]
+}

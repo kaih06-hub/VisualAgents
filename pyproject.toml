@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "visualagents"
+version = "0.1.0"
+description = "A live map of which agent in a multi-agent AI system is doing what - from its chain of thought."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "VisualAgents contributors" }]
+keywords = ["agents", "multi-agent", "llm", "langgraph", "crewai", "autogen", "observability", "visualization"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Debuggers",
+]
+dependencies = ["anthropic>=1.15"]
+
+[project.optional-dependencies]
+openai = ["openai>=1.40"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+visualagents = "visualagents.cli:main"
+vagents = "visualagents.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kaih06-hub/VisualAgents"
+Issues = "https://github.com/kaih06-hub/VisualAgents/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["visualagents"]
+
+[tool.hatch.build.targets.sdist]
+include = ["visualagents", "examples", "tests", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
