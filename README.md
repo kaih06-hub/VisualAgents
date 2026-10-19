@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/kaih06-hub/VisualAgents/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kaih06-hub/VisualAgents/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://pypi.org/project/visualagents/"><img alt="PyPI" src="https://img.shields.io/pypi/v/visualagents?color=3987e5"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2ea44f">
   <img alt="Runs locally" src="https://img.shields.io/badge/runs-100%25%20locally-555">
@@ -70,12 +71,12 @@ terminal, on your own machine, with no changes to your code.
 Requires Python 3.10+.
 
 ```bash
-uv tool install "visualagents[all] @ git+https://github.com/kaih06-hub/VisualAgents.git"
+pipx install "visualagents[all]"
 ```
 
-or with pipx: `pipx install "visualagents[all] @ git+https://github.com/kaih06-hub/VisualAgents.git"`.
+or `uv tool install "visualagents[all]"`, or `pip install "visualagents[all]"` into any environment.
 Claude support is built in; `[all]` adds Gemini and OpenAI / OpenAI-compatible servers (Ollama, LM Studio, vLLM).
-From a local clone: `uv tool install --editable ./VisualAgents --with google-genai --with openai`.
+Latest from GitHub: `pipx install "visualagents[all] @ git+https://github.com/kaih06-hub/VisualAgents.git"`.
 
 ### 2. See it work (no API key)
 
