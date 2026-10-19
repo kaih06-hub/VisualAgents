@@ -28,6 +28,13 @@ AGENT_FACTORIES = {
 }
 GROUP_CLASSES = {"GroupChat", "RoundRobinGroupChat", "SelectorGroupChat", "Swarm", "MagenticOneGroupChat"}
 SEQUENTIAL_CLASSES = {"SequentialAgent", "LoopAgent"}
+# SDK clients / chat models: a class that builds or calls one is an LLM-backed component.
+LLM_CLIENTS = {
+    "OpenAI", "AsyncOpenAI", "AzureOpenAI", "AsyncAzureOpenAI", "Anthropic", "AsyncAnthropic", "AnthropicBedrock",
+    "Groq", "AsyncGroq", "Mistral", "Together", "Cohere", "ClientV2", "GenerativeModel", "ChatOpenAI",
+    "ChatAnthropic", "ChatGoogleGenerativeAI", "ChatOllama", "ChatGroq", "ChatMistralAI", "ChatBedrock",
+}
+LLM_CALLS = {"completions.create", "messages.create", "models.generate_content", "generate_content", "responses.create"}
 START_NAMES = {"START", "__start__"}
 END_NAMES = {"END", "__end__"}
 DESC_KWARGS = ("goal", "description", "instructions", "system_message", "system_prompt", "prompt", "backstory")
@@ -50,6 +57,8 @@ class _Collector:
         self.yaml_agents: dict[str, dict[str, Any]] = {}
         self.yaml_tasks: list[tuple[str, dict[str, Any]]] = []
         self.tool_funcs: set[str] = set()
+        self.llm_classes: dict[str, dict[str, Any]] = {}  # class name -> where it is defined + instance names
+        self.instances: dict[str, set[str]] = {}  # class name -> variable/attribute names holding instances
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -191,6 +200,33 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             parents[child] = node
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             c.functions[node.name] = node
+
+    # classes that create or call an LLM client (used when no framework agents are found)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        uses_llm = False
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                fn = sub.func
+                if _call_name(sub) in LLM_CLIENTS:
+                    uses_llm = True
+                elif isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Attribute):
+                    if f"{fn.value.attr}.{fn.attr}" in LLM_CALLS:
+                        uses_llm = True
+            if uses_llm:
+                break
+        if uses_llm:
+            doc = ast.get_docstring(node) or ""
+            c.llm_classes.setdefault(node.name, {"file": src.rel, "line": node.lineno, "doc": doc.split("\n")[0]})
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            cls_name = _call_name(node.value)
+            if cls_name and cls_name[:1].isupper():
+                for t in node.targets:
+                    name = t.id if isinstance(t, ast.Name) else t.attr if isinstance(t, ast.Attribute) else None
+                    if name:
+                        c.instances.setdefault(cls_name, set()).add(name)
 
     # CrewAI @CrewBase classes: @agent / @task decorated methods
     for node in ast.walk(tree):
@@ -587,6 +623,13 @@ def scan(root: Path, files: list[SourceFile] | None = None) -> dict[str, Any]:
         if seq:
             c.entry.append(seq[0])
             c.exits.append(seq[-1])
+
+    # no framework: every class that talks to an LLM is a component worth watching
+    if not c.agents and c.llm_classes:
+        for cls_name, info in c.llm_classes.items():
+            c.add_agent(cls_name, file=info["file"], line=info["line"], role="LLM-backed component",
+                        description=info["doc"], aliases=sorted(c.instances.get(cls_name, ())))
+        c.vote("custom", 1)
 
     # generic fallback: classes named *Agent with a run-ish method
     if not c.agents:

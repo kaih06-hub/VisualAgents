@@ -408,9 +408,280 @@ def _hook_openai_agents(module):
     module._visualagents_hooked = True
 
 
+# -- raw OpenAI SDK (apps that call chat.completions.create themselves, e.g. LAMBDA) ------
+
+# Frameworks that already report their own agents (instrumented above, or printing their own logs).
+_FRAMEWORK_MARKERS = ("langchain", "langgraph", "crewai", "litellm", "autogen", "llama_index", "smolagents",
+                      os.sep + "agents" + os.sep, "dspy", "haystack", "semantic_kernel")
+_LIB_MARKERS = ("site-packages", "dist-packages")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_last_task = {}
+
+
+def _stdlib_dirs():
+    import sysconfig
+
+    paths = sysconfig.get_paths()
+    # os.__file__ is the real standard library even inside a virtualenv
+    return tuple(p for p in {os.path.dirname(os.__file__), paths.get("stdlib"), paths.get("platstdlib")} if p)
+
+
+_STDLIB = _stdlib_dirs()
+
+
+def _is_library(filename):
+    if not filename or filename.startswith("<"):
+        return True
+    return (any(m in filename for m in _LIB_MARKERS) or filename.startswith(_STDLIB)
+            or os.path.dirname(os.path.abspath(filename)) == _HERE)
+
+
+def _caller_agent():
+    """Name of the code that made the LLM call: the nearest user class (Programmer, Inspector, ...) or
+    function. Returns False when a framework that reports itself is on the stack."""
+    frame = sys._getframe(2)
+    hint = None
+    while frame is not None:
+        filename = frame.f_code.co_filename or ""
+        if any(m in filename for m in _FRAMEWORK_MARKERS) and _is_library(filename):
+            return False
+        if hint is None and not _is_library(filename):
+            self_obj = frame.f_locals.get("self")
+            if self_obj is not None:
+                hint = type(self_obj).__name__
+            elif frame.f_code.co_name not in ("<module>", "<lambda>", "<listcomp>", "<genexpr>", "<dictcomp>"):
+                hint = frame.f_code.co_name
+        frame = frame.f_back
+    return hint
+
+
+def _get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+class _LLMCall:
+    def __init__(self, kwargs):
+        self.agent = _caller_agent()
+        self.off = self.agent is False
+        if self.off:
+            return
+        self.content = []
+        self.reasoning = []
+        self.tools = {}
+        self.finished = False
+        messages = kwargs.get("messages") or []
+        # results of the tools requested last turn arrive as trailing tool/function messages
+        results = []
+        for m in reversed(list(messages)):
+            if _get(m, "role") in ("tool", "function"):
+                results.append(m)
+            else:
+                break
+        for m in reversed(results):
+            emit("tool_end", self.agent, _content_text(_get(m, "content")), tool=_get(m, "name"), hint=True)
+        task = None
+        last_user = next((m for m in reversed(list(messages)) if _get(m, "role") == "user"), None)
+        if last_user is not None:
+            text = _content_text(_get(last_user, "content"))
+            if text and _last_task.get(self.agent) != text:
+                _last_task[self.agent] = text
+                task = text
+        emit("agent_start", self.agent, task, hint=True, model=kwargs.get("model"))
+
+    def absorb_message(self, msg):
+        if msg is None:
+            return
+        self._add_text(_get(msg, "content"), _get(msg, "reasoning_content") or _get(msg, "reasoning"))
+        for i, tc in enumerate(_get(msg, "tool_calls") or []):
+            fn = _get(tc, "function")
+            self.tools[i] = [_get(fn, "name") or "tool", _get(fn, "arguments") or ""]
+        fc = _get(msg, "function_call")
+        if fc is not None:
+            self.tools["legacy"] = [_get(fc, "name") or "function", _get(fc, "arguments") or ""]
+
+    def absorb_chunk(self, chunk):
+        try:
+            choices = _get(chunk, "choices") or []
+            if not choices:
+                return
+            delta = _get(choices[0], "delta")
+            if delta is None:
+                return
+            self._add_text(_get(delta, "content"), _get(delta, "reasoning_content") or _get(delta, "reasoning"))
+            for tc in _get(delta, "tool_calls") or []:
+                slot = self.tools.setdefault(_get(tc, "index", 0), ["", ""])
+                fn = _get(tc, "function")
+                if fn is not None:
+                    slot[0] = slot[0] or _get(fn, "name") or ""
+                    slot[1] += _get(fn, "arguments") or ""
+            fc = _get(delta, "function_call")
+            if fc is not None:
+                slot = self.tools.setdefault("legacy", ["", ""])
+                slot[0] = slot[0] or _get(fc, "name") or ""
+                slot[1] += _get(fc, "arguments") or ""
+        except Exception:
+            pass
+
+    def _add_text(self, content, reasoning):
+        if isinstance(content, str) and content:
+            self.content.append(content)
+        if isinstance(reasoning, str) and reasoning:
+            self.reasoning.append(reasoning)
+
+    def finish(self, error=None):
+        if self.off or self.finished:
+            return
+        self.finished = True
+        if self.reasoning:
+            emit("thought", self.agent, "".join(self.reasoning).strip(), hint=True)
+        text = "".join(self.content).strip()
+        if text:
+            emit("thought" if self.tools else "output", self.agent, text, hint=True)
+        for name, args in self.tools.values():
+            emit("tool_start", self.agent, args, tool=name or "tool", hint=True)
+        if error is not None:
+            emit("error", self.agent, "%s: %s" % (type(error).__name__, error), hint=True)
+        emit("agent_end", self.agent, hint=True)
+
+
+def _content_text(content):
+    if isinstance(content, list):
+        parts = [_get(p, "text") for p in content]
+        content = "\n".join(p for p in parts if isinstance(p, str))
+    return content if isinstance(content, str) else (None if content is None else str(content))
+
+
+class _StreamProxy:
+    """Passes a streamed completion through untouched while collecting what the model said."""
+
+    def __init__(self, stream, call):
+        self._stream = stream
+        self._call = call
+        self._it = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._it is None:
+            self._it = iter(self._stream)
+        try:
+            chunk = next(self._it)
+        except StopIteration:
+            self._call.finish()
+            raise
+        except BaseException as exc:
+            self._call.finish(exc)
+            raise
+        self._call.absorb_chunk(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._call.finish()
+        close = getattr(self._stream, "close", None)
+        if close:
+            close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def __del__(self):
+        try:
+            self._call.finish()
+        except Exception:
+            pass
+
+
+class _AsyncStreamProxy(_StreamProxy):
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._it is None:
+            self._it = self._stream.__aiter__()
+        try:
+            chunk = await self._it.__anext__()
+        except StopAsyncIteration:
+            self._call.finish()
+            raise
+        except BaseException as exc:
+            self._call.finish(exc)
+            raise
+        self._call.absorb_chunk(chunk)
+        return chunk
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        self._call.finish()
+        close = getattr(self._stream, "close", None)
+        if close:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        return False
+
+
+def _finish_response(call, result, streaming, is_async):
+    if call.off:
+        return result
+    if streaming:
+        return _AsyncStreamProxy(result, call) if is_async else _StreamProxy(result, call)
+    try:
+        choices = _get(result, "choices") or []
+        call.absorb_message(_get(choices[0], "message") if choices else None)
+    finally:
+        call.finish()
+    return result
+
+
+def _hook_openai(_module=None):
+    from openai.resources.chat import completions as cc
+
+    for name, is_async in (("Completions", False), ("AsyncCompletions", True)):
+        cls = getattr(cc, name, None)
+        if cls is None or getattr(cls.create, "_visualagents", False):
+            continue
+        original = cls.create
+        if is_async:
+            async def create(self, *args, _original=original, **kwargs):
+                try:
+                    call = _LLMCall(kwargs)
+                except Exception:
+                    return await _original(self, *args, **kwargs)
+                try:
+                    result = await _original(self, *args, **kwargs)
+                except BaseException as exc:
+                    call.finish(exc)
+                    raise
+                return _finish_response(call, result, bool(kwargs.get("stream")), True)
+        else:
+            def create(self, *args, _original=original, **kwargs):
+                try:
+                    call = _LLMCall(kwargs)
+                except Exception:
+                    return _original(self, *args, **kwargs)
+                try:
+                    result = _original(self, *args, **kwargs)
+                except BaseException as exc:
+                    call.finish(exc)
+                    raise
+                return _finish_response(call, result, bool(kwargs.get("stream")), False)
+        functools.update_wrapper(create, original)
+        create._visualagents = True
+        cls.create = create
+
+
 # -- import hooks -----------------------------------------------------------------
 
-_HOOKS = {"langchain_core.callbacks.manager": _hook_langchain, "agents": _hook_openai_agents}
+_HOOKS = {"langchain_core.callbacks.manager": _hook_langchain, "agents": _hook_openai_agents, "openai": _hook_openai}
 
 
 class _PostImportFinder(importlib.abc.MetaPathFinder):

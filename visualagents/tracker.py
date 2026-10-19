@@ -264,7 +264,7 @@ class Tracker:
         typ = str(p.get("type") or p.get("event") or "log")
         if self.run["status"] == "idle":
             self.run.update(status="running", started=self.clock())
-        soft = bool(p.get("soft"))
+        soft = bool(p.get("soft") or p.get("hint"))  # hint: agent name guessed from the call stack
         name = p.get("agent")
         aid = self._lookup(name, create=not soft) if name else None
         out: list[dict[str, Any]] = []
@@ -282,6 +282,7 @@ class Tracker:
             self.precise = True
             parent = self.active if self.active and self.active != aid and self.agents[self.active]["status"] == "active" else None
             out += self._activate(aid, source="sdk")
+            self.agents[aid]["status"] = "active"  # the same agent taking another turn
             if parent:  # nested call (agent-as-tool, supervisor sub-call): parent waits for us
                 self.stack.append(parent)
                 self.agents[parent]["status"] = "waiting"
@@ -363,6 +364,8 @@ class Tracker:
         aid = self.matcher.resolve(str(name))
         if aid is None and create:
             aid = self._discover(str(name))
+        if aid is None and not create and len(self.bp["agents"]) == 1:
+            aid = self.bp["agents"][0]["id"]  # single-agent app: whatever made the call is that agent
         return aid
 
     def _discover(self, name: str) -> str | None:

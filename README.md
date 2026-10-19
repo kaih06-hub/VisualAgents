@@ -82,7 +82,7 @@ VisualAgents combines three sources, from most to least precise:
 
 | Source | When | What you get |
 |---|---|---|
-| **Auto-instrumentation** | `visualagents run` with a Python app using LangChain / LangGraph or the OpenAI Agents SDK | Exact node/agent boundaries, LLM replies as thoughts, every tool call — no code changes. Injected via `PYTHONPATH`; disable with `--no-instrument`. |
+| **Auto-instrumentation** | `visualagents run` with a Python app using LangChain / LangGraph, the OpenAI Agents SDK, or the **OpenAI SDK directly** (`chat.completions.create` — sync, async, streaming, any OpenAI-compatible endpoint) | Exact agent boundaries, LLM replies as thoughts, every tool call and tool result — no code changes. Raw SDK calls are credited to the class or function that made them (e.g. `Programmer`, `Inspector`). Injected via `PYTHONPATH`; disable with `--no-instrument`. |
 | **Console patterns** | Always | Recognises CrewAI (`# Agent: …`, rich panels), AutoGen (`coder (to critic):`, `---------- coder ----------`), LangGraph stream output (`Update from node …`, `{'node': …}`), ReAct (`Thought:` / `Action:` / `Observation:` / `Final Answer:`), handoff phrases (`Handing off to Writer`, `transfer_to_billing`), `[Agent] …` prefixes, and tool names owned by a single agent. |
 | **LLM narration** (`--smart`) | Optional | Every few seconds an LLM reads the latest output and says which agent is working and summarises what it's doing in one line. |
 
@@ -116,6 +116,29 @@ Under `visualagents run` the stdlib-only runtime is importable even if VisualAge
 app's environment: `from visualagents_runtime import agent, emit`. Marker lines are hidden from your terminal.
 For LangChain without `run`, pass `visualagents.langchain_handler()` in `callbacks=[…]`; for the OpenAI Agents
 SDK, `agents.add_trace_processor(visualagents.openai_agents_processor())`.
+
+### Example: a web-app agent (LAMBDA)
+
+[LAMBDA](https://github.com/AMA-CMFAI/LAMBDA) (a data-science agent) runs as a FastAPI backend plus a React UI, and
+calls the OpenAI SDK directly. Its `start.sh` sends the backend to the background, so run the backend through
+VisualAgents instead and start the UI separately:
+
+```bash
+git clone https://github.com/AMA-CMFAI/LAMBDA.git ~/LAMBDA
+cd ~/LAMBDA/backend && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+cp .env.example .env                                   # set OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_LIST
+visualagents scan ~/LAMBDA
+visualagents run ~/LAMBDA --cwd ~/LAMBDA/backend -- ./venv/bin/python -m uvicorn main:app --port 8000
+# second terminal: LAMBDA's own UI
+cd ~/LAMBDA/frontend && npm install && VITE_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev -- --port 3000
+```
+
+Ask LAMBDA something at http://localhost:3000 and watch it at http://127.0.0.1:7420. The current LAMBDA is one
+agent with tools (Python, shell, files, a to-do list), so the map shows its reasoning, each tool call and result,
+and the turns on the time ruler. The paper's two-agent design — a Programmer that writes code and an Inspector that
+debugs it — is on the `legacy-open-source` branch (`git clone -b legacy-open-source …`, configure `config.yaml`,
+then `visualagents run ~/LAMBDA-v1 -- ./venv/bin/python lambda_app.py`), where the map shows the two agents
+handing work back and forth.
 
 ## The blueprint
 

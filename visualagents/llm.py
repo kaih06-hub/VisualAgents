@@ -285,7 +285,8 @@ list a tool under the agent that calls it.
 - ids are stable snake_case names taken from the code: LangGraph node names, CrewAI agents.yaml keys, \
 Agent(name=...) values, AutoGen agent names.
 - aliases: every string that may identify the agent in logs - node name, variable names, class name, the \
-name= value, CrewAI role text with template variables removed.
+name= value, CrewAI role text with template variables removed. Always include the name of the class (or \
+function) that actually makes the LLM calls for this agent, e.g. the class holding the OpenAI client.
 - keywords: 3-8 distinctive words or short phrases this agent's own output is likely to contain.
 - edges: handoffs / control flow (who passes work to whom). conditional=true when a router, supervisor or \
 LLM decision picks the next agent. Include loops such as critic -> writer.

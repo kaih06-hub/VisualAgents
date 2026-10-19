@@ -66,7 +66,7 @@
     filter: null, hideLogs: false, autoScroll: true, lastItem: null,
     modalAuto: false, lastActive: undefined, pendingAnims: [], raf: 0,
     drawerId: null, drawerTimer: 0, narrated: false, wasDisconnected: false, es: null,
-    bubbleText: "", moved: {}, shift: { x: 0, y: 0 }, clearedSeq: 0,
+    bubbleText: "", moved: {}, shift: { x: 0, y: 0 },
     scrubT: null, hist: null, playing: false, speed: 4, hoverItem: null,
   };
 
@@ -921,7 +921,6 @@
   }
 
   function passes(ev) {
-    if (ev.seq <= S.clearedSeq) return false;
     if (S.hideLogs && (ev.kind === "log" || ev.kind === "status")) return false;
     if (!S.filter) return true;
     if (ev.agent === S.filter) return true;
@@ -1567,7 +1566,6 @@
     document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeModal));
     $("#drawer-close").onclick = closeDrawer;
     $("#hide-logs").onchange = (e) => { S.hideLogs = e.target.checked; rebuildFeed(); };
-    $("#clear-feed").onclick = () => { S.clearedSeq = S.seqMax; rebuildFeed(); };
     $("#reset-view").onclick = () => fetch("/api/reset", { method: "POST" });
     feedEl.addEventListener("scroll", () => {
       const atEnd = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 40;

@@ -182,3 +182,12 @@ def test_recurring_supervisor_does_not_skip_ahead_in_steps():
         t.ingest_structured({"type": "agent_end", "agent": agent})
         seen.append(t.step_index)
     assert seen == [0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5]
+
+
+def test_unmatched_hint_maps_to_the_only_agent():
+    bp = bpm.normalize({"agents": [{"name": "LAMBDA agent"}]})
+    t = make_tracker(bp)
+    t.ingest_structured({"type": "agent_start", "agent": "LLMService", "hint": True})
+    t.ingest_structured({"type": "tool_start", "agent": "LLMService", "tool": "execute_python", "text": "df", "hint": True})
+    assert t.active == "lambda_agent"
+    assert t.snapshot()["agents"]["lambda_agent"]["tools"] == 1

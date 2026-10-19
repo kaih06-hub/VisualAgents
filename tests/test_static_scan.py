@@ -82,3 +82,32 @@ def test_autogen_group_chat(tmp_path):
     bp = scan(tmp_path)
     assert bp["framework"] == "autogen"
     assert ("critic", "planner") in edges(bp)
+
+
+def test_classes_that_call_an_llm_are_agents_without_a_framework(tmp_path):
+    (tmp_path / "programmer.py").write_text(
+        "import openai\n"
+        "class Programmer:\n"
+        "    \"\"\"Writes analysis code.\"\"\"\n"
+        "    def __init__(self):\n"
+        "        self.client = openai.OpenAI()\n"
+        "class Helper:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+    )
+    (tmp_path / "inspector.py").write_text(
+        "class Inspector:\n"
+        "    def check(self, client):\n"
+        "        return client.chat.completions.create(model='m', messages=[])\n"
+    )
+    (tmp_path / "conversation.py").write_text(
+        "from programmer import Programmer\n"
+        "class Conversation:\n"
+        "    def __init__(self):\n"
+        "        self.programmer = Programmer()\n"
+    )
+    bp = scan(tmp_path)
+    assert sorted(a["id"] for a in bp["agents"]) == ["inspector", "programmer"]
+    prog = next(a for a in bp["agents"] if a["id"] == "programmer")
+    assert prog["description"] == "Writes analysis code."
+    assert "programmer" in prog["aliases"]
