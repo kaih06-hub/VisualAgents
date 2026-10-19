@@ -14,10 +14,18 @@ keywords = ["agents", "multi-agent", "llm", "langgraph", "crewai", "autogen", "g
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
+  "Environment :: Web Environment",
   "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Software Development :: Debuggers",
+  "Topic :: System :: Monitoring",
 ]
 dependencies = ["anthropic>=1.15"]
 
@@ -33,7 +41,9 @@ vagents = "visualagents.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kaih06-hub/VisualAgents"
+Documentation = "https://github.com/kaih06-hub/VisualAgents#readme"
 Issues = "https://github.com/kaih06-hub/VisualAgents/issues"
+Changelog = "https://github.com/kaih06-hub/VisualAgents/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["visualagents"]

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="112" alt="VisualAgents logo">
+  <img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/logo.svg" width="112" alt="VisualAgents logo">
 </p>
 
 <h1 align="center">VisualAgents</h1>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/demo.gif" width="920" alt="VisualAgents following a four-agent research crew: the planner, researcher, writer and critic light up in turn while their chain of thought streams on the right">
+  <img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/demo.gif" width="920" alt="VisualAgents following a four-agent research crew: the planner, researcher, writer and critic light up in turn while their chain of thought streams on the right">
 </p>
 
 Multi-agent apps usually show you one long stream of thoughts and tool calls. You can't tell which specialist is
@@ -165,7 +165,7 @@ have: `python main.py 2>&1 | visualagents pipe .`, or `visualagents watch . --lo
 
 ### Live map
 
-<img src="docs/images/live-map.png" alt="The live map: Planner and Researcher done, the Writer revising after the Critic's review, its thought in a bubble; the time ruler shows each agent's turn">
+<img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/live-map.png" alt="The live map: Planner and Researcher done, the Writer revising after the Critic's review, its thought in a bubble; the time ruler shows each agent's turn">
 
 - **Graph** — agents laid out in workflow order (left→right, or top→bottom on narrow screens). The working agent
   glows with a bubble showing what it's thinking; finished agents get a ✓; arrows show who hands work to whom,
@@ -180,7 +180,7 @@ have: `python main.py 2>&1 | visualagents pipe .`, or `visualagents watch . --lo
 
 ### Blueprint
 
-<img src="docs/images/blueprint.png" alt="The blueprint popup: summary, entry and exit agents, a numbered step timeline, then each agent with its role, tools and source file">
+<img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/blueprint.png" alt="The blueprint popup: summary, entry and exit agents, a numbered step timeline, then each agent with its role, tools and source file">
 
 The first time you open a project the blueprint pops up (press **B** any time): a summary, where requests enter and
 which agent answers, the step-by-step flow, every agent with its role, tools and source location, and every
@@ -188,7 +188,7 @@ handoff. It scrolls in one column, top to bottom.
 
 ### Time ruler — rewind and replay
 
-<img src="docs/images/rewind.png" alt="Rewound to 00:17: the Researcher is working, later steps are not reached yet, and the chain of thought after that moment is dimmed">
+<img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/rewind.png" alt="Rewound to 00:17: the Researcher is working, later steps are not reached yet, and the chain of thought after that moment is dimmed">
 
 Each agent's turn is a segment on the ruler, with the workflow steps above it. Drag the playhead back and the
 whole dashboard rewinds — who was working, which step, what it was thinking, and the chain of thought up to that
@@ -198,8 +198,8 @@ second (later lines dim). **▶ / Space** replays at 1–16×; **Live / L** jump
 
 <table>
   <tr>
-    <td width="72%"><img src="docs/images/dark.png" alt="The dashboard in dark mode while the Critic reviews the draft"></td>
-    <td><img src="docs/images/phone.png" alt="The dashboard on a phone-sized screen, laid out top to bottom"></td>
+    <td width="72%"><img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/dark.png" alt="The dashboard in dark mode while the Critic reviews the draft"></td>
+    <td><img src="https://raw.githubusercontent.com/kaih06-hub/VisualAgents/main/docs/images/phone.png" alt="The dashboard on a phone-sized screen, laid out top to bottom"></td>
   </tr>
 </table>
 
@@ -309,9 +309,9 @@ Without `run`: LangChain → `callbacks=[visualagents.langchain_handler()]`; Ope
 | Example | Try it |
 |---|---|
 | Simulated research crew (built in) | `visualagents demo` |
-| [LangGraph supervisor team](examples/langgraph_supervisor) — runs offline | `pip install langgraph` then `visualagents run examples/langgraph_supervisor` |
-| [CrewAI template](examples/crewai_project) — YAML agents and tasks | `visualagents scan examples/crewai_project` |
-| [Hand-rolled agents with `emit`](examples/manual_sdk) | `visualagents run examples/manual_sdk` |
+| [LangGraph supervisor team](https://github.com/kaih06-hub/VisualAgents/tree/main/examples/langgraph_supervisor) — runs offline | `pip install langgraph` then `visualagents run examples/langgraph_supervisor` |
+| [CrewAI template](https://github.com/kaih06-hub/VisualAgents/tree/main/examples/crewai_project) — YAML agents and tasks | `visualagents scan examples/crewai_project` |
+| [Hand-rolled agents with `emit`](https://github.com/kaih06-hub/VisualAgents/tree/main/examples/manual_sdk) | `visualagents run examples/manual_sdk` |
 
 **LAMBDA (a data-science agent).** [LAMBDA](https://github.com/AMA-CMFAI/LAMBDA) is a FastAPI backend plus a React
 UI that calls the OpenAI SDK directly, and its `start.sh` runs both in the background:

@@ -1,0 +1,28 @@
+name: Bug report
+description: Something didn't work, or the map was wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, and what you saw instead. Screenshots welcome.
+    validations:
+      required: true
+  - type: input
+    id: project
+    attributes:
+      label: Agent project / framework
+      description: e.g. a GitHub URL, or "LangGraph 0.4 supervisor"
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `visualagents --version`, your OS and Python version, and how you started it (run / hook / pipe).
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal output
+      description: Remove any API keys before pasting.
+      render: text

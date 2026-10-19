@@ -1,0 +1,17 @@
+name: Framework / format support
+description: Ask VisualAgents to understand another agent framework or log format
+labels: [enhancement]
+body:
+  - type: input
+    id: framework
+    attributes:
+      label: Framework
+      description: Name and link
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Example code or console output
+      description: A small agent definition and/or a few lines of what it prints while working.
+      render: text
