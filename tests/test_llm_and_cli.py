@@ -96,6 +96,37 @@ def test_secrets_are_redacted():
     assert "<redacted>" in out
 
 
+def test_secrets_named_like_keys_are_redacted_but_code_is_kept():
+    from visualagents.collector import redact
+
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhY2Nlc3MiOiJtIn0.c2lnbmF0dXJlLXZhbHVl"
+    toml = f'[qdrant]\nKEY = "{jwt}"\nPASSWORD = "hunter2!x"\nMAX_NEW_TOKENS = 512\nMODEL = "Qwen/Qwen3-30B"\n'
+    out = redact(toml, config=True)
+    assert jwt not in out and "hunter2!x" not in out
+    assert "MAX_NEW_TOKENS = 512" in out and 'MODEL = "Qwen/Qwen3-30B"' in out
+    assert "hush-hush-value" not in redact('{"api_key": "hush-hush-value"}', config=True)
+    assert "hush-hush-value" not in redact("db_password: hush-hush-value\n", config=True)
+    code = "tokenizer = load_tokenizer(name)\ntoken = get_token()\n"
+    assert redact(code) == code  # unquoted values in code are left alone
+
+
+def test_gitignored_files_never_reach_the_llm(tmp_path):
+    import subprocess
+
+    from visualagents.collector import collect, pack
+
+    (tmp_path / ".gitignore").write_text("config.toml\ndata/\n")
+    (tmp_path / "agents.py").write_text("from crewai import Agent\nresearcher = Agent(role='Researcher')\n")
+    (tmp_path / "config.toml").write_text('[llm]\nagent_model = "gpt-5"\nendpoint = "https://private.example"\n')
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "parsed.json").write_text('{"agent": "private document text"}')
+    (tmp_path / "eslint.config.mjs").write_text("export default [] // agent config\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    files = collect(tmp_path)
+    assert [f.rel for f in files] == ["agents.py"]
+    assert "private" not in pack(files)[0]
+
+
 def test_cli_scan_and_blueprint(tmp_path, capsys):
     project = tmp_path / "proj"
     project.mkdir()

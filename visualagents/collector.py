@@ -1,7 +1,8 @@
 """Collects the source files of a project that are most likely to define agents.
 
-Secrets never leave the machine: env/key files are skipped and anything that looks
-like an API key is redacted before file contents are handed to an LLM.
+Secrets never leave the machine: files git ignores (local config, data, user documents)
+and env/key files are skipped, and anything that looks like an API key is redacted
+before file contents are handed to an LLM.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,14 @@ SKIP_DIRS = {
 }
 SOURCE_EXTS = {".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".yaml", ".yml", ".toml", ".json", ".ipynb", ".md"}
 SECRET_NAMES = re.compile(r"(^\.env)|(\.(pem|key|p12|pfx|crt)$)|(secret|credential|password|token)", re.I)
+# Build-tool configs say nothing about agents but would win ranking slots for "config" in their name.
+TOOL_CONFIGS = re.compile(
+    r"^(\.?(eslint|prettier|postcss|tailwind|next|vite|vitest|webpack|babel|jest|rollup|svelte|nuxt|"
+    r"astro|stylelint|commitlint|lint-staged)(\.config)?\.(js|cjs|mjs|ts|json|ya?ml)|"
+    r"tsconfig(\.[\w-]+)?\.json|components\.json)$",
+    re.I,
+)
+CONFIG_EXTS = {".yaml", ".yml", ".toml", ".json", ".md"}
 MAX_FILE_BYTES = 400_000
 
 AGENT_HINTS = re.compile(
@@ -38,8 +48,17 @@ SECRET_PATTERNS = [
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
     re.compile(r"AIza[0-9A-Za-z_\-]{30,}"),
-    re.compile(r"""(?i)((?:api[_-]?key|secret|token|password)\s*[:=]\s*["'])([^"']{8,})(["'])"""),
+    re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),  # JWTs (Qdrant, Supabase...)
+    # quoted values of anything *named* like a secret: KEY = "...", "api_key": "...", password='...'
+    re.compile(
+        r"""(?i)(\b[\w.\-]*(?:key|secret|token|passw(?:or)?d|pwd|credential)s?\b["']?\s*[:=]\s*["'])"""
+        r"""([^"'\n]{6,})(["'])"""
+    ),
 ]
+# Unquoted `name: value` / `NAME=value` lines; only in config-like files, where code would be misread.
+CONFIG_SECRET = re.compile(
+    r"""(?im)^(\s*[\w.\-]*(?:key|secret|token|passw(?:or)?d|pwd|credential)s?\s*[:=][ \t]*)([^\s"'#]{6,})[ \t]*$"""
+)
 
 
 @dataclass
@@ -50,13 +69,29 @@ class SourceFile:
     score: float
 
 
-def redact(text: str) -> str:
+def redact(text: str, config: bool = False) -> str:
     for pat in SECRET_PATTERNS:
         if pat.groups >= 3:
             text = pat.sub(lambda m: f"{m.group(1)}<redacted>{m.group(3)}", text)
         else:
             text = pat.sub("<redacted>", text)
+    if config:
+        text = CONFIG_SECRET.sub(lambda m: f"{m.group(1)}<redacted>", text)
     return text
+
+
+def _git_visible(root: Path) -> set[Path] | None:
+    """Files git would not ignore under root (tracked + untracked), or None outside a git repo."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return {(root / rel).resolve() for rel in res.stdout.decode("utf-8", "replace").split("\0") if rel}
 
 
 def _read(path: Path) -> str | None:
@@ -83,16 +118,19 @@ def iter_files(root: Path):
     if root.is_file():
         yield root
         return
+    visible = _git_visible(root.resolve())
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
             d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".") and not d.endswith(".egg-info")
         )
         for name in sorted(filenames):
             p = Path(dirpath) / name
-            if p.suffix.lower() not in SOURCE_EXTS or SECRET_NAMES.search(name):
+            if p.suffix.lower() not in SOURCE_EXTS or SECRET_NAMES.search(name) or TOOL_CONFIGS.match(name):
                 continue
             if name in {"package-lock.json", "poetry.lock", "uv.lock", "yarn.lock", "pnpm-lock.yaml"}:
                 continue
+            if visible is not None and p.resolve() not in visible:
+                continue  # gitignored: local config with credentials, data, the user's own documents
             yield p
 
 
@@ -131,7 +169,7 @@ def pack(files: list[SourceFile], budget_chars: int = 180_000) -> tuple[str, lis
     for f in files:
         if f.score <= 0 and included:
             continue
-        body = redact(f.text)
+        body = redact(f.text, config=f.path.suffix.lower() in CONFIG_EXTS)
         numbered = "\n".join(f"{i:>4}| {line}" for i, line in enumerate(body.splitlines(), 1))
         chunk = f'<file path="{f.rel}">\n{numbered}\n</file>\n'
         if used + len(chunk) > budget_chars:

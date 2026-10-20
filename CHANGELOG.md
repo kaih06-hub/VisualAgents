@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The LLM scan no longer reads files git ignores (local config with credentials, data, your own documents), skips
+  build-tool configs, and redacts more secrets: JWTs, `KEY = "..."`, `"api_key": "..."` and unquoted
+  `password: ...` lines in config files.
+
 ## 0.1.0 — 2026-10-19
 
 First public release (alpha).
