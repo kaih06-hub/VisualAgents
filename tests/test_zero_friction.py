@@ -92,6 +92,17 @@ def test_prefers_the_projects_chat_cli_over_its_server_and_web_ui(tmp_path):
     assert argv == [str(venv / "bin" / "rr-chat")] and ".venv" in notes[0]
 
 
+def test_console_scripts_are_read_without_a_toml_library(tmp_path, monkeypatch):
+    """Python 3.10 has no tomllib (and tomli is optional): the scripts tables are still read."""
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    monkeypatch.setitem(sys.modules, "tomli", None)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rr"\ndependencies = ["x"]\n\n[project.scripts]\nrr-chat = "rr.chat:main"  # the chat\n'
+        '"rr-serve" = "rr.server:main"\n\n[tool.ruff]\nline-length = 120\n\n'
+        '[tool.poetry.scripts]\nrr_load = "rr.load:main"\n')
+    assert detect._project_scripts(tmp_path) == ["rr-chat", "rr-serve", "rr_load"]
+
+
 def test_a_script_that_backgrounds_the_app_still_reports(tmp_path):
     """start.sh puts the app in the background with its output in a log file - events arrive over HTTP."""
     (tmp_path / "app.py").write_text(APP)

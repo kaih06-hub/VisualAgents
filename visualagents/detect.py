@@ -269,17 +269,44 @@ def _from_readme(project: Path) -> list[Candidate]:
 def _project_scripts(project: Path) -> list[str]:
     """Console-script names the project defines in pyproject.toml (PEP 621 or Poetry)."""
     p = project / "pyproject.toml"
-    if not p.is_file():
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
         return []
     try:
-        import tomllib  # type: ignore
-
-        data = tomllib.loads(p.read_text(encoding="utf-8"))
+        try:
+            import tomllib  # type: ignore
+        except ImportError:  # Python 3.10
+            import tomli as tomllib  # type: ignore
+    except ImportError:
+        return _scripts_tables(text)
+    try:
+        data = tomllib.loads(text)
     except Exception:
         return []
     scripts = dict((data.get("project") or {}).get("scripts") or {})
     scripts.update(((data.get("tool") or {}).get("poetry") or {}).get("scripts") or {})
     return list(scripts)
+
+
+_TOML_TABLE = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$")
+_TOML_KEY = re.compile(r"""^\s*(["']?)([\w.\-]+)\1\s*=""")
+
+
+def _scripts_tables(text: str) -> list[str]:
+    """The keys of [project.scripts] and [tool.poetry.scripts], for a Python with no TOML reader (3.10 without
+    tomli): enough to know which commands are the project's own."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        table = _TOML_TABLE.match(line)
+        if table:
+            inside = table.group(1).replace('"', "").replace(" ", "") in ("project.scripts", "tool.poetry.scripts")
+            continue
+        key = _TOML_KEY.match(line) if inside else None
+        if key and key.group(2) not in out:
+            out.append(key.group(2))
+    return out
 
 
 def _script_bonus(name: str, own: list[str]) -> int:
