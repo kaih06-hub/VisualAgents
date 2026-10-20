@@ -360,8 +360,9 @@ include it, with the outline's file and line.
 heuristic: reuse their names, aliases and line numbers, but drop hint agents the source shows are plumbing or \
 belong to something you leave off the map, and add agents the hints missed. Their framework is a guess. Their \
 facts, when present, are structural facts to weigh: ports (the same agent names defined on two frameworks, \
-each in its own folder) and config_lists (default lists of roles or agents in configuration that name parts \
-of the project)."""
+each in its own folder), config_lists (default lists of roles or agents in configuration that name parts of the \
+project) and factories (code that creates one of several agents depending on a setting - the setting picks which \
+one runs, so they are alternatives)."""
 
 NARRATE_SYSTEM = """You watch the live console output of a multi-agent AI program for VisualAgents. Given the \
 program's agents and its most recent log lines, decide which agent is working right now and describe what it \

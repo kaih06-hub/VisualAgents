@@ -29,9 +29,16 @@
   frameworks (with each one's folder), default roles / agents lists in configuration, and which class creates each
   DSPy program. Subclasses of an agent base class and DSPy programs (`dspy.Module`s with their own predictors) are
   found as agents; a program an agent holds is its tool, and one that calls programs in turn gives their handoffs.
+- Static analysis finds more of what a project really defines: subclasses of the project's own agent base
+  (`BaseAgent`, `LLMAgent`, `Role`), OpenAI Agents SDK agents built as `Agent[Context](...)` with handoffs wired
+  after the fact (`triage.handoffs = [...]`, `.append(...)`), and code that picks one agent by a setting
+  (`if config.type == "retry": ...`, a registry dict), reported to the LLM as a fact. Model calls inside an agent
+  class count for that class instead of each method. `add_node` / `add_edge` are LangGraph only where LangGraph is
+  imported - not networkx or a project's own graph of actions.
 - The framework badge comes from what the files defining the agents import, not from a name mentioned anywhere: a
   LangGraph team is LangGraph even when many other files import LangChain for model calls, another framework's
-  `Task` class is not CrewAI, and a project's own `agents.py` is not the OpenAI Agents SDK.
+  `Task` class is not CrewAI, and a project's own `agents.py` is not the OpenAI Agents SDK (one inside a package
+  does not hide it).
 
 ## 0.1.1 — 2026-10-19
 

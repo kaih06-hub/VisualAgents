@@ -202,9 +202,24 @@ def _base_names(cls: ast.ClassDef) -> list[str]:
     return [b for b in out if b]
 
 
+def agent_class_names(files: list[SourceFile]) -> set[str]:
+    """Classes that look like agents: named like one, or inheriting - through the project's own classes too - from
+    an agent base (MungerAgent(LLMAgent), Planner(Role), TopicExpert(dspy.Module))."""
+    return {n for _, names in _agent_classes(files)[1] for n in names}
+
+
 def _mark_agent_files(files: list[SourceFile]) -> list[SourceFile]:
-    """Files that define an agent class: one named like an agent, or one inheriting - through the project's own
-    classes too - from an agent base (MungerAgent(LLMAgent), Planner(Role), TopicExpert(dspy.Module))."""
+    """Files that define an agent class (see agent_class_names)."""
+    marked = []
+    for f, names in _agent_classes(files)[1]:
+        if names and not TEST_PATH.search(f.rel.replace(os.sep, "/")):
+            f.defines_agent = True
+            marked.append(f)
+    return marked
+
+
+def _agent_classes(files: list[SourceFile]) -> tuple[dict[str, set[str]], list[tuple[SourceFile, list[str]]]]:
+    """(bases of every class, [(file, the agent-like classes it defines)])."""
     bases: dict[str, set[str]] = {}
     per_file: list[tuple[SourceFile, list[str]]] = []
     for f in files:
@@ -227,12 +242,7 @@ def _mark_agent_files(files: list[SourceFile]) -> list[SourceFile]:
         memo[name] = hit
         return hit
 
-    marked = []
-    for f, names in per_file:
-        if any(agentish(n) for n in names) and not TEST_PATH.search(f.rel.replace(os.sep, "/")):
-            f.defines_agent = True
-            marked.append(f)
-    return marked
+    return bases, [(f, [n for n in names if agentish(n)]) for f, names in per_file]
 
 
 def _outline_lines(f: SourceFile) -> list[str]:

@@ -57,6 +57,12 @@ FRAMEWORK_IMPORTS = (
 WEAK_FRAMEWORKS = {"langchain", "custom"}
 DSPY_PREDICTORS = {"Predict", "ChainOfThought", "ChainOfThoughtWithHint", "ReAct", "ProgramOfThought",
                    "MultiChainComparison", "TypedPredictor", "TypedChainOfThought", "Refine", "BestOfN", "CodeAct"}
+# graph-building calls: LangGraph's where it is imported, a project's own workflow API (literal node names) where no
+# graph library is, and nothing in files that build networkx / graphviz graphs
+GRAPH_CALLS = {"add_node", "add_edge", "add_conditional_edges", "set_entry_point", "set_finish_point", "Command"}
+OTHER_GRAPH_LIBS = ("networkx", "graphviz", "pygraphviz", "pydot", "igraph", "rustworkx", "dgl", "torch_geometric")
+# a project's own agent base class: BaseAgent, LLMAgent, AbstractAgent, AgentBase, Role
+OWN_AGENT_BASE = re.compile(r"(Agent|AgentBase|Role)$")
 # config keys that list the roles a run uses: session.roles, default_agents, WORKERS
 ROLE_LIST_KEY = re.compile(r"(^|[._])(roles|agents|workers|members)$", re.I)
 
@@ -82,6 +88,9 @@ class _Collector:
         self.file_votes: dict[str, dict[str, int]] = {}  # file -> framework -> evidence
         self.sites: dict[str, list[tuple[str, int]]] = {}  # agent key -> every (file, line) that defines it
         self.role_lists: list[tuple[str, int, list[str]]] = []  # (file, line, names) of default roles lists
+        self.trees: dict[str, ast.Module] = {}  # file -> its parsed Python, parsed once
+        self.project_frameworks: set[str] = set()  # frameworks any file of the project imports
+        self.agent_classes: set[str] = set()  # names of the classes found to be agents or agent programs
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -165,7 +174,7 @@ def _ref(node: ast.AST | None) -> str | None:
 
 
 def _call_name(node: ast.Call) -> str:
-    f = node.func
+    f = node.func.value if isinstance(node.func, ast.Subscript) else node.func  # Agent[Context](...)
     if isinstance(f, ast.Name):
         return f.id
     if isinstance(f, ast.Attribute):
@@ -233,9 +242,11 @@ def _frameworks_imported(modules: set[str], src: SourceFile, root: Path) -> list
 
 
 def _local_module(src: SourceFile, root: Path, name: str) -> bool:
+    """A sibling agents.py shadows the SDK only from a folder Python runs scripts in - not from inside a package,
+    where `from agents import` is absolute."""
     d = src.path.parent
     while d == root or root in d.parents:
-        if (d / f"{name}.py").is_file() or (d / name).is_dir():
+        if not (d / "__init__.py").is_file() and ((d / f"{name}.py").is_file() or (d / name).is_dir()):
             return True
         d = d.parent
     return False
@@ -269,16 +280,28 @@ def _role_lists(tree: ast.AST, rel: str, c: _Collector) -> None:
             c.role_lists.append((rel, node.lineno, found))
 
 
-def _scan_python(src: SourceFile, c: _Collector) -> None:
+def _parse(src: SourceFile) -> ast.Module | None:
     try:
-        tree = ast.parse(src.text)
+        return ast.parse(src.text)
     except (SyntaxError, ValueError):
+        return None
+
+
+def _scan_python(src: SourceFile, c: _Collector) -> None:
+    tree = c.trees.get(src.rel) or _parse(src)
+    if tree is None:
         return
     text = src.text
-    imported = _frameworks_imported(_imported_modules(tree), src, c.root)
+    modules = _imported_modules(tree)
+    imported = _frameworks_imported(modules, src, c.root)
     for fw in imported:
         c.vote(fw, 2)
     _role_lists(tree, src.rel, c)
+    # add_node / add_edge are LangGraph's where this file imports it, or where the project does (a builder split
+    # from the module that creates the StateGraph); without it they are the project's own workflow API, read only
+    # with literal node names; a file that builds networkx / graphviz graphs has no agent graph at all
+    other_graph = any(m == lib or m.startswith(lib + ".") for m in modules for lib in OTHER_GRAPH_LIBS)
+    langgraph = "langgraph" in imported or ("langgraph" in c.project_frameworks and not other_graph)
 
     parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
@@ -315,16 +338,33 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                                 "agents": [ag.group(1)] if ag else [], "description": "",
                                 "_task": cfg.group(1) if cfg else node.name})
 
+    for node in ast.walk(tree):  # handoffs wired after the agents exist: a.handoffs = [b, c]; a.handoffs.append(d)
+        target, value = None, None
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            value = node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("append", "extend") \
+                and node.args:
+            target, value = node.func.value, node.args[0] if node.func.attr == "extend" else ast.List(elts=node.args)
+        if isinstance(target, ast.Attribute) and target.attr == "handoffs" and value is not None:
+            owner = _ref(target.value)
+            for ref in _list_refs(value) if owner else []:
+                c.edges.append({"from": owner, "to": ref, "label": "handoff", "conditional": True})
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         name = _call_name(node)
         parent = parents.get(node)
         targets = _assigned_names(parent) if parent is not None else []
+        if name in GRAPH_CALLS and not langgraph and (other_graph or name == "Command" or not node.args or not all(
+                _lit(a) for a in node.args[:1 if name in ("add_node", "add_conditional_edges") else 2])):
+            continue
 
         # -- graph builders (LangGraph) ------------------------------------
         if name == "add_node" and isinstance(node.func, ast.Attribute):
-            c.vote("langgraph")
+            if langgraph:
+                c.vote("langgraph")
             first = node.args[0] if node.args else _kw(node, "node")
             second = node.args[1] if len(node.args) > 1 else _kw(node, "action")
             node_name = _lit(first) or _ref(first)
@@ -673,15 +713,12 @@ def _dotted(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
-def _class_defs(files: list[SourceFile]) -> tuple[list[_ClassDef], set[str]]:
+def _class_defs(files: list[SourceFile], trees: dict[str, ast.Module]) -> tuple[list[_ClassDef], set[str]]:
     """Every class, and the names of everything the project calls (to tell which classes it ever creates)."""
     out, called = [], set()
     for f in files:
-        if f.path.suffix.lower() not in (".py", ".ipynb") or TEST_PATH.search(f.rel.replace(os.sep, "/")):
-            continue
-        try:
-            tree = ast.parse(f.text)
-        except (SyntaxError, ValueError):
+        tree = trees.get(f.rel)
+        if tree is None or TEST_PATH.search(f.rel.replace(os.sep, "/")):
             continue
         mods, names = set(), {}
         for node in ast.walk(tree):
@@ -689,8 +726,9 @@ def _class_defs(files: list[SourceFile]) -> tuple[list[_ClassDef], set[str]]:
                 mods.update(a.asname or a.name for a in node.names if a.name == "dspy")
             elif isinstance(node, ast.ImportFrom) and node.module == "dspy":
                 names.update({a.asname or a.name: a.name for a in node.names})
-            elif isinstance(node, ast.Call):
-                called.add(_dotted(node.func).split(".")[-1])
+            elif isinstance(node, ast.Call):  # Agent(...), Agent.from_config(...), Agent[Ctx](...)
+                parts = _dotted(node.func).split(".")
+                called.update({parts[0], parts[-1]})
         out += [_ClassDef(n, f.rel, mods, names) for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
     return out, called
 
@@ -702,7 +740,7 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
     agent's tool; a module that calls programs in turn (a writer asking an expert, round after round) is how work
     flows between them. A program nothing in the project creates is not part of a run; the others say which
     classes create them, so the model can tell a pipeline step from a part of something bigger."""
-    defs, called = _class_defs(files)
+    defs, called = _class_defs(files, c.trees)
     by_name: dict[str, list[_ClassDef]] = {}
     for d in defs:
         by_name.setdefault(d.name, []).append(d)
@@ -720,8 +758,14 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
     def is_module(d: _ClassDef, b: str, last: str) -> bool:
         return (b.count(".") == 1 and b.split(".")[0] in d.dspy_mods and last == "Module") or d.dspy_names.get(b) == "Module"
 
-    agent_classes = [d for d in defs if d.name not in subclassed and not d.name.startswith(("Base", "Abstract"))
-                     and inherits(d, lambda d, b, last: last in AGENT_CLASSES)]
+    def abstract(d: _ClassDef) -> bool:  # a base others build on - unless the project also creates it directly
+        return d.name.startswith(("Base", "Abstract")) or d.name in ("Agent", "Role", "AgentBase") \
+            or any(b.split(".")[-1] in ("ABC", "ABCMeta") for b in d.bases) or (d.name in subclassed and d.name not in called)
+
+    def agent_base(d: _ClassDef, b: str, last: str) -> bool:  # a framework's agent class, or the project's own
+        return last in AGENT_CLASSES or (last in by_name and bool(OWN_AGENT_BASE.search(last)))
+
+    agent_classes = [d for d in defs if not abstract(d) and inherits(d, agent_base)]
     modules = [d for d in defs if inherits(d, is_module)]
     programs = {d.name: d for d in modules if any(d.dspy_attr(n.func) in DSPY_PREDICTORS for n in d.calls())}
 
@@ -753,6 +797,7 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
                 queue += sorted(held_by.get(h, set()) - seen)
         return None
 
+    c.agent_classes |= {d.name for d in agent_classes} | set(programs)
     created = {n for n in programs if n in called} or set(programs)
     standalone = set()
     for name, d in programs.items():
@@ -866,6 +911,67 @@ def _ports(c: _Collector) -> list[dict[str, Any]]:
     return out
 
 
+def _factories(c: _Collector) -> list[dict[str, Any]]:
+    """Fact: code that creates one of several agents depending on a setting - an if/elif or match on one value
+    (`if config.type == "retry": return RetryAgent.from_config(config)`), or a registry dict ({"retry": RetryAgent}).
+    The setting picks which one runs."""
+    agents = c.agent_classes | {k for a in c.agents.values() for k in a["aliases"] if k[:1].isupper()}
+
+    def created(body: list[ast.stmt]) -> str | None:
+        for n in (x for stmt in body for x in ast.walk(stmt)):
+            if isinstance(n, ast.Call):
+                cls = _dotted(n.func).split(".")[0]  # Agent(...), Agent.from_config(...), Agent[Ctx](...)
+                if cls in agents:
+                    return cls
+        return None
+
+    def case(test: ast.AST) -> tuple[str, str] | None:
+        """(what is compared, the value it selects) for x == "v", "v" == x and isinstance(x, VConfig)."""
+        if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq):
+            left, right = test.left, test.comparators[0]
+            for subject, value in ((left, right), (right, left)):
+                if _lit(value) is not None and _dotted(subject):
+                    return _dotted(subject), _lit(value)  # type: ignore[return-value]
+        if isinstance(test, ast.Call) and _call_name(test) == "isinstance" and len(test.args) == 2:
+            return f"type({_dotted(test.args[0])})", _dotted(test.args[1])
+        return None
+
+    out = []
+    for rel, tree in c.trees.items():
+        if TEST_PATH.search(rel.replace(os.sep, "/")):
+            continue
+        for node in ast.walk(tree):
+            switch, options = None, {}
+            if isinstance(node, ast.If) and not getattr(node, "_elif", False):
+                branch: ast.AST | None = node
+                while isinstance(branch, ast.If):
+                    picked = case(branch.test)
+                    if picked is None or (switch is not None and picked[0] != switch):
+                        break
+                    switch = picked[0]
+                    cls = created(branch.body)
+                    if cls:
+                        options[picked[1]] = cls
+                    nxt = branch.orelse[0] if len(branch.orelse) == 1 and isinstance(branch.orelse[0], ast.If) else None
+                    if nxt is not None:
+                        nxt._elif = True  # type: ignore[attr-defined]
+                    branch = nxt
+            elif isinstance(node, ast.Match):
+                switch = _dotted(node.subject)
+                for m in node.cases:
+                    if isinstance(m.pattern, ast.MatchValue) and _lit(m.pattern.value) is not None:
+                        cls = created(m.body)
+                        if cls:
+                            options[_lit(m.pattern.value)] = cls
+            elif isinstance(node, ast.Dict) and len(node.keys) >= 2 and all(_lit(k) for k in node.keys):
+                refs = {_lit(k): _dotted(v) for k, v in zip(node.keys, node.values)}
+                if all(v in agents for v in refs.values()):
+                    switch, options = "a registry key", refs
+            if switch and len(set(options.values())) >= 2:
+                out.append({"file": rel, "line": node.lineno, "chooses_by": switch, "options": options})
+    return out
+
+
 def _config_lists(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]]:
     """Fact: default lists of roles / agents / workers whose names are folders or modules of the project
     (roles = ["planner", "coder"]), so the model can tell what a default run switches on. A list of chat roles
@@ -884,11 +990,18 @@ def _config_lists(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]
 
 def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any] | None = None) -> dict[str, Any]:
     """Pass a dict as `facts` to get structural facts for the LLM: `ports` (the same agent names defined on two
-    frameworks) and `config_lists` (default roles / agents lists naming parts of the project)."""
+    frameworks), `config_lists` (default roles / agents lists naming parts of the project) and `factories` (code that
+    creates one of several agents depending on a setting)."""
     root = Path(root).resolve()
     files = files if files is not None else collect(root, max_files=600)
     c = _Collector()
     c.root = root if root.is_dir() else root.parent
+    for f in files:
+        if f.path.suffix.lower() in (".py", ".ipynb"):
+            tree = _parse(f)
+            if tree is not None:
+                c.trees[f.rel] = tree
+                c.project_frameworks.update(_frameworks_imported(_imported_modules(tree), f, c.root))
     for f in files:
         ext = f.path.suffix.lower()
         c.file = f.rel
@@ -987,7 +1100,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
     if facts is not None:
-        facts.update({k: v for k, v in (("ports", _ports(c)), ("config_lists", _config_lists(c, files))) if v})
+        found = (("ports", _ports(c)), ("config_lists", _config_lists(c, files)), ("factories", _factories(c)))
+        facts.update({k: v for k, v in found if v})
     framework = _framework(c)
     names = [a["name"] for a in c.agents.values()]
     raw = {

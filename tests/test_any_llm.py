@@ -305,3 +305,36 @@ def test_real_anthropic_and_gemini_sdks_are_tracked(tmp_path):
     assert ("translator", "task", "translate hello") in sdk
     assert ("translator", "thought", "weighing formal vs casual") in sdk
     assert ("translator", "output", "Bonjour") in sdk
+
+
+def test_call_sites_in_an_agent_class_are_named_by_the_class(tmp_path):
+    """A class built like an agent is one agent, even when other code calls its methods (a shared LLM client class,
+    called from everywhere, still splits into the methods that write their own prompts)."""
+    from visualagents import call_sites
+    from visualagents.collector import collect
+
+    (tmp_path / "llm.py").write_text(
+        "import openai\n"
+        "class Chat:\n"
+        "    def __init__(self):\n"
+        "        self.client = openai.OpenAI()\n"
+        "    def generate_response(self, prompt):\n"
+        "        return self.client.chat.completions.create(model='m', messages=[{'role': 'user', 'content': prompt}])\n"
+    )
+    (tmp_path / "agents.py").write_text(
+        "class BaseAgent:\n"
+        "    pass\n"
+        "class CriticAgent(BaseAgent):\n"
+        "    def step(self, prompt):\n"
+        "        return self.llm.generate_response(prompt)\n"
+        "    def add_message_to_memory(self, messages):\n"
+        "        return self.llm.generate_response(messages)\n"
+    )
+    (tmp_path / "env.py").write_text(
+        "class Env:\n"
+        "    def run(self, critic):\n"
+        "        return critic.step('You are a careful critic. Review the draft and list every unsupported claim.')\n"
+    )
+    names = {a["name"] for a in call_sites.find(collect(tmp_path))["agents"]}
+    assert "CriticAgent" in names
+    assert "add_message_to_memory" not in names

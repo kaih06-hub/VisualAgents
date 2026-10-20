@@ -339,3 +339,101 @@ def test_a_list_of_chat_roles_is_not_a_config_fact(tmp_path):
     facts = {}
     scan(tmp_path, facts=facts)
     assert "config_lists" not in facts
+
+
+# -- static facts that carry over to unseen projects ---------------------------------------------------------
+
+
+def test_graph_calls_are_langgraph_only_where_langgraph_is_imported(tmp_path):
+    _write(tmp_path, {
+        "viz.py": "import networkx as nx\nG = nx.DiGraph()\nG.add_node('parent_id')\nG.add_edge('a', 'b')\n",
+        # a project's own graph of actions, built from constants: not an agent graph
+        "actions.py": "from .graph import ActionGraph\ng = ActionGraph()\ng.add_node(ISSUE_TYPE)\ng.add_node(PRODUCT_GOALS)\n",
+        "team.py": "from agents import Agent\nwriter = Agent(name='Writer', instructions='Write')\n",
+    })
+    bp = scan(tmp_path)
+    assert {a["id"] for a in bp["agents"]} == {"writer"}
+    assert bp["framework"] == "openai-agents"
+
+
+def test_a_graph_builder_split_from_the_module_that_imports_langgraph_still_counts(tmp_path):
+    _write(tmp_path, {
+        "graph.py": "from langgraph.graph import StateGraph\nfrom nodes import build\ng = build(StateGraph(dict))\n",
+        "nodes.py": "def build(g):\n    g.add_node('plan', plan)\n    g.add_node('act', act)\n    g.add_edge('plan', 'act')\n"
+                    "    return g\n",
+    })
+    bp = scan(tmp_path)
+    assert {a["id"] for a in bp["agents"]} == {"plan", "act"} and ("plan", "act") in edges(bp)
+    assert bp["framework"] == "langgraph"
+
+
+def test_agent_classes_on_a_projects_own_base_are_agents(tmp_path):
+    _write(tmp_path, {
+        "agents/base.py": "class BaseAgent:\n    pass\n",
+        "agents/solver.py": "from .base import BaseAgent\nclass SolverAgent(BaseAgent):\n    \"\"\"Proposes a solution.\"\"\"\n",
+        "agents/critic.py": "from .base import BaseAgent\nclass CriticAgent(BaseAgent):\n    pass\n",
+        "roles/role.py": "class Role:\n    pass\nclass Architect(Role):\n    pass\n",
+        "loop.py": (  # a concrete agent other classes extend is still an agent when the project creates it
+            "from abc import ABC\n"
+            "class AbstractAgent(ABC):\n    pass\n"
+            "class DefaultAgent(AbstractAgent):\n    pass\n"
+            "class ShellAgent(DefaultAgent):\n    pass\n"
+            "agent = DefaultAgent.from_config(cfg)\n"
+        ),
+        "state.py": "from typing import TypedDict\nclass AgentState(TypedDict):\n    x: int\n"
+                    "class ResearchState(AgentState):\n    y: int\n",
+    })
+    bp = scan(tmp_path)
+    names = {a["name"] for a in bp["agents"]}
+    assert names == {"SolverAgent", "CriticAgent", "Architect", "DefaultAgent", "ShellAgent"}
+    assert next(a for a in bp["agents"] if a["name"] == "SolverAgent")["description"] == "Proposes a solution."
+
+
+def test_code_that_picks_one_agent_by_a_setting_is_a_fact(tmp_path):
+    _write(tmp_path, {
+        "agents.py": (
+            "class AbstractAgent:\n    pass\n"
+            "class DefaultAgent(AbstractAgent):\n    pass\n"
+            "class RetryAgent(AbstractAgent):\n    pass\n"
+            "class ShellAgent(AbstractAgent):\n    pass\n"
+            "def get_agent_from_config(config):\n"
+            "    if config.type == 'default':\n"
+            "        return DefaultAgent.from_config(config)\n"
+            "    elif config.type == 'retry':\n"
+            "        return RetryAgent.from_config(config)\n"
+            "    elif config.type == 'shell':\n"
+            "        return ShellAgent.from_config(config)\n"
+            "    raise ValueError(config.type)\n"
+            "REGISTRY = {'default': DefaultAgent, 'retry': RetryAgent}\n"
+            "LABELS = {'default': 'Default', 'retry': 'Retry'}\n"  # strings, not agents
+        ),
+    })
+    facts = {}
+    scan(tmp_path, facts=facts)
+    by_line = {f["line"]: f for f in facts["factories"]}
+    assert by_line[10] == {"file": "agents.py", "line": 10, "chooses_by": "config.type",
+                           "options": {"default": "DefaultAgent", "retry": "RetryAgent", "shell": "ShellAgent"}}
+    assert by_line[17] == {"file": "agents.py", "line": 17, "chooses_by": "a registry key",
+                           "options": {"default": "DefaultAgent", "retry": "RetryAgent"}}
+    assert len(facts["factories"]) == 2  # the elif branches are one chain, and LABELS maps to strings
+
+
+def test_an_agents_module_inside_a_package_does_not_hide_the_sdk(tmp_path):
+    _write(tmp_path, {
+        "backend/__init__.py": "",
+        "backend/airline/__init__.py": "",
+        "backend/airline/agents.py": (  # imported as airline.agents; `from agents import` here is the SDK
+            "from agents import Agent, handoff\n"
+            "faq = Agent[Context](name='FAQ Agent', instructions='Answer policy questions')\n"
+            "billing = Agent[Context](name='Billing Agent', instructions='Handle billing')\n"
+            "triage = Agent[Context](name='Triage Agent', instructions='Route', handoffs=[])\n"
+            "triage.handoffs = [faq, handoff(agent=billing, on_handoff=log)]\n"
+            "faq.handoffs.append(triage)\n"
+            "billing.handoffs.extend([faq, triage])\n"
+        ),
+    })
+    bp = scan(tmp_path)
+    assert bp["framework"] == "openai-agents"
+    assert {a["id"] for a in bp["agents"]} == {"faq_agent", "billing_agent", "triage_agent"}
+    assert edges(bp) == {("triage_agent", "faq_agent"), ("triage_agent", "billing_agent"),
+                         ("faq_agent", "triage_agent"), ("billing_agent", "faq_agent"), ("billing_agent", "triage_agent")}

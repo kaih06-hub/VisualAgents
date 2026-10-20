@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .collector import SourceFile
+from .collector import SourceFile, agent_class_names
 
 LLM_MODULES = (
     "openai", "anthropic", "google.genai", "google.generativeai", "litellm", "ollama", "mlx_lm", "mlx_vlm",
@@ -146,10 +146,13 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     for fn in direct:
         climb(fn, fn.via, 0, frozenset(), (), ())
 
+    # a class named or built like an agent (SolverAgent(BaseAgent)) is one agent, whichever of its methods reach the
+    # model and however much other code calls them; only a shared client class (LLMService) splits into its methods
+    agent_classes = agent_class_names(files)
     agents: dict[str, dict[str, Any]] = {}  # agent id -> agent
     owner: dict[str, str] = {}  # function name -> agent id
     for fn in sorted(sites.values(), key=lambda s: (s.rel, s.line)):
-        if fn.cls and (fn.rel, fn.cls) not in services:
+        if fn.cls and ((fn.rel, fn.cls) not in services or fn.cls in agent_classes):
             aid, name, aliases = f"{fn.rel}:{fn.cls}", fn.cls, [fn.cls, fn.name]
         elif fn.name == "<module>":
             stem = re.sub(r"\.(py|ipynb)$", "", fn.rel.rsplit("/", 1)[-1])
