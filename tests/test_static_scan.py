@@ -217,7 +217,7 @@ _DSPY_PIPELINE = {
         "        self.outline = WriteOutline()\n"
     ),
     "interface.py": "from abc import ABC\nclass Agent(ABC):\n    pass\n",
-    # a second system whose agents are classes: the DSPy programs next to them are their parts, not agents
+    # a second system whose agents are classes; a program one of them holds is its tool
     "costorm/agents.py": (
         "import dspy\n"
         "from interface import Agent\n"
@@ -252,27 +252,31 @@ def test_dspy_programs_and_agent_subclasses_are_agents_in_every_pipeline(tmp_pat
     bp = scan(tmp_path)
     assert bp["framework"] == "dspy"
     by_id = {a["id"]: a for a in bp["agents"]}
-    assert set(by_id) == {"wiki_writer", "topic_expert", "write_outline", "co_storm_expert", "moderator"}
+    # NaiveOutlineGen is never created: not part of a run. UtteranceModule belongs to the agent that holds it.
+    assert set(by_id) == {"wiki_writer", "topic_expert", "write_outline", "summary_module", "co_storm_expert",
+                          "moderator"}
     assert {("wiki_writer", "topic_expert"), ("topic_expert", "wiki_writer")} <= edges(bp)  # the turns loop
     assert by_id["co_storm_expert"]["tools"] == ["UtteranceModule"]
     assert by_id["co_storm_expert"]["description"] == "A domain expert in the roundtable."
     assert by_id["wiki_writer"]["file"] == "storm/curation.py" and by_id["wiki_writer"]["line"] == 4
+    # who creates each program is a fact for the model: a step of a runner, or part of something bigger
+    assert by_id["wiki_writer"]["role"] == "DSPy program, created by ConvSimulator"
+    assert by_id["write_outline"]["role"] == "DSPy program, created by WikiRunner"
+    assert by_id["summary_module"]["role"] == "DSPy program"
 
 
-def test_the_same_team_on_another_framework_is_an_alternative_not_more_agents(tmp_path):
+def test_the_same_team_on_two_frameworks_is_reported_not_dropped(tmp_path):
     _write(tmp_path, {
         "multi_agents/agents/orchestrator.py": (
             "from langgraph.graph import StateGraph, END\n"
             "g = StateGraph(dict)\n"
-            "g.add_node('planner', editor.plan)\n"
-            "g.add_node('researcher', research)\n"
-            "g.add_node('writer', write)\n"
-            "g.add_node('reviewer', review)\n"
-            "g.set_entry_point('planner')\n"
+            + "".join(f"g.add_node('{n}', {n})\n" for n in ("planner", "researcher", "writer", "reviewer", "publisher"))
+            + "g.set_entry_point('planner')\n"
             "g.add_edge('planner', 'researcher')\n"
             "g.add_edge('researcher', 'writer')\n"
             "g.add_edge('writer', 'reviewer')\n"
-            "g.add_edge('reviewer', END)\n"
+            "g.add_edge('reviewer', 'publisher')\n"
+            "g.add_edge('publisher', END)\n"
         ),
         "multi_agents/ag2/agents/orchestrator.py": (
             "from autogen import ConversableAgent, GroupChat\n"
@@ -283,15 +287,14 @@ def test_the_same_team_on_another_framework_is_an_alternative_not_more_agents(tm
             "chat = GroupChat(agents=[chief, researcher, reviewer, writer], messages=[])\n"
         ),
     })
-    alternatives = []
-    bp = scan(tmp_path, alternatives=alternatives)
-    assert bp["framework"] == "langgraph"
-    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "writer", "reviewer"]
-    assert {a["file"] for a in bp["agents"]} == {"multi_agents/agents/orchestrator.py"}
-    assert edges(bp) == {("planner", "researcher"), ("researcher", "writer"), ("writer", "reviewer")}
-    assert alternatives[0]["kind"] == "port" and alternatives[0]["paths"] == ["multi_agents/ag2"]
-    assert "ChiefEditor" in alternatives[0]["agents"]
-    assert "multi_agents/ag2" in bp["summary"]
+    facts = {}
+    bp = scan(tmp_path, facts=facts)
+    assert bp["framework"] == "langgraph"  # every file that defines an agent counts, whatever the file order
+    assert "chief_editor" in {a["id"] for a in bp["agents"]}  # static analysis reports; the model decides
+    port = facts["ports"][0]
+    assert port["shared_agents"] == ["Researcher", "Writer", "Reviewer"]
+    assert [(i["framework"], i["folder"]) for i in port["implementations"]] == [
+        ("langgraph", "multi_agents/agents"), ("autogen", "multi_agents/ag2")]
 
 
 _ROLES = {
@@ -320,59 +323,19 @@ _ROLES = {
 }
 
 
-def test_roles_the_default_config_leaves_out_are_not_parallel_workers(tmp_path):
+def test_a_default_roles_list_naming_parts_of_the_project_is_reported(tmp_path):
     _write(tmp_path, _ROLES)
-    _write(tmp_path, {
-        "app/ext_role/web_search/web_search.py": "class WebSearch(Role):\n    pass\n",
-        "app/llm/openai_api.py": (  # not a role folder: a model client stays whatever static analysis made of it
-            "class ChatCompletion:\n"
-            "    def run(self, client, system_prompt):\n"
-            "        return client.chat.completions.create(model='m', messages=[{'role': 'system', 'content': 'x'}])\n"
-        ),
-    })
-    alternatives = []
-    bp = scan(tmp_path, alternatives=alternatives)
-    names = {a["name"] for a in bp["agents"]}
-    assert {"Planner", "CodeGenerator"} <= names
-    assert not names & {"CodeGeneratorCLIOnly", "CodeGeneratorPluginOnly", "ImageReader"}
-    variants, extras = alternatives
-    assert variants["kind"] == extras["kind"] == "config"
-    assert variants["default"] == ["planner", "code_interpreter"]
-    assert variants["file"] == "app/session/session.py" and variants["line"] == 3
-    assert variants["paths"] == ["app/code_interpreter/code_interpreter_cli_only",
-                                 "app/code_interpreter/code_interpreter_plugin_only"]
-    # extra roles a config has to switch on, found by their role module even when no agent was detected there
-    assert extras["paths"] == ["app/ext_role/image_reader", "app/ext_role/web_search"]
-    assert extras["agents"] == ["ImageReader"]
-    assert "app/ext_role/{image_reader, web_search}" in bp["summary"]
+    facts = {}
+    bp = scan(tmp_path, facts=facts)
+    assert facts["config_lists"] == [{"file": "app/session/session.py", "line": 3,
+                                      "names": ["planner", "code_interpreter"]}]
+    # nothing is dropped for it: which roles a default run uses is for the model to read
+    assert {"Planner", "CodeGenerator", "CodeGeneratorCLIOnly", "ImageReader"} <= {a["name"] for a in bp["agents"]}
 
 
-def test_apps_built_on_the_project_in_community_folders_are_not_its_agents(tmp_path):
-    _write(tmp_path, {
-        "owl/utils/role_playing.py": (
-            "from camel.agents import ChatAgent\n"
-            "user_agent = ChatAgent(system_message='You give instructions')\n"
-            "assistant_agent = ChatAgent(system_message='You solve the task')\n"
-        ),
-        "community_usecase/stock_app/main.py": (
-            "".join(f"a{i} = Analyst{i}Agent(model_name=m)\n" for i in range(4))
-        ),
-        "community_usecase/stock_app/agents/base.py": "from camel.agents import ChatAgent\n",
-    })
-    alternatives = []
-    bp = scan(tmp_path, alternatives=alternatives)
-    assert {a["id"] for a in bp["agents"]} == {"user_agent", "assistant_agent"}
-    assert alternatives[0]["kind"] == "showcase" and alternatives[0]["paths"] == ["community_usecase"]
-    # ...but when the community folder is all there is, it is the project
-    only = tmp_path / "only"
-    _write(only, {"use_cases/stock/main.py": "a = AnalystAgent(model_name=m)\n"})
-    assert [a["id"] for a in scan(only)["agents"]] == ["a"]
-
-
-def test_a_roles_list_of_chat_roles_changes_nothing(tmp_path):
+def test_a_list_of_chat_roles_is_not_a_config_fact(tmp_path):
     _write(tmp_path, {k: v for k, v in _ROLES.items() if "session" not in k})
     _write(tmp_path, {"app/chat.py": "ROLES = ['user', 'assistant']\n"})
-    alternatives = []
-    bp = scan(tmp_path, alternatives=alternatives)
-    assert alternatives == []
-    assert "CodeGeneratorCLIOnly" in {a["name"] for a in bp["agents"]}
+    facts = {}
+    scan(tmp_path, facts=facts)
+    assert "config_lists" not in facts

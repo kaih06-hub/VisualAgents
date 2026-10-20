@@ -20,16 +20,18 @@
   agent is the code that writes the system prompt and runs the loop, named after its prompt ("You are LAMBDA, ..."),
   with the tools it hands the model. The client wrapper and code kernels are no longer shown as agents, and calls
   made from another asyncio task still light up the right agent.
-- A repository with several independent systems maps all of them (STORM's wiki pipeline next to Co-STORM), and
-  DSPy programs (`dspy.Module`s with their own predictors) and subclasses of an agent base class are agents; a
-  program an agent holds is its tool, and one that calls programs in turn gives their handoffs.
-- Alternatives are no longer drawn as more agents: a port of the same team to another framework (gpt-researcher's
-  `multi_agents/ag2`), role variants a config default picks between (TaskWeaver's CLI-only and plugin-only code
-  generators), roles a config has to switch on, and apps built on top of the project in community / use-case /
-  cookbook folders are left off the map and named in the summary.
-- The framework badge comes from what the agents' own files import: OWL is CAMEL rather than CrewAI, a LangGraph
-  team is LangGraph even when forty other files import LangChain for model calls, and a project's own `agents.py`
-  is not the OpenAI Agents SDK.
+- The LLM scan is taught the common shapes of agent systems rather than particular projects: pipelines, routers
+  and supervisors, turn-taking pairs and group chats, critic loops, planners with executors, fan-out, nested teams
+  and several independent systems in one repository - and what to leave off the map and name in the summary
+  instead: ports to another framework, legacy copies, role variants a setting picks between, opt-in roles, and
+  apps built with the project rather than part of it.
+- Static analysis hands the LLM facts to weigh instead of deciding for it: the same agent names defined on two
+  frameworks (with each one's folder), default roles / agents lists in configuration, and which class creates each
+  DSPy program. Subclasses of an agent base class and DSPy programs (`dspy.Module`s with their own predictors) are
+  found as agents; a program an agent holds is its tool, and one that calls programs in turn gives their handoffs.
+- The framework badge comes from what the files defining the agents import, not from a name mentioned anywhere: a
+  LangGraph team is LangGraph even when many other files import LangChain for model calls, another framework's
+  `Task` class is not CrewAI, and a project's own `agents.py` is not the OpenAI Agents SDK.
 
 ## 0.1.1 — 2026-10-19
 

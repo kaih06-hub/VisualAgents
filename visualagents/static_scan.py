@@ -59,8 +59,6 @@ DSPY_PREDICTORS = {"Predict", "ChainOfThought", "ChainOfThoughtWithHint", "ReAct
                    "MultiChainComparison", "TypedPredictor", "TypedChainOfThought", "Refine", "BestOfN", "CodeAct"}
 # config keys that list the roles a run uses: session.roles, default_agents, WORKERS
 ROLE_LIST_KEY = re.compile(r"(^|[._])(roles|agents|workers|members)$", re.I)
-# folders of apps other people built on top of the project: community_usecase/, use_cases/, cookbook/
-SHOWCASE_DIR = re.compile(r"^(community[\w\- ]*|[\w\- ]*use[_\- ]?cases?|cookbooks?|contrib|showcases?|gallery)$", re.I)
 
 
 class _Collector:
@@ -83,8 +81,6 @@ class _Collector:
         self.file: str | None = None  # the file being scanned
         self.file_votes: dict[str, dict[str, int]] = {}  # file -> framework -> evidence
         self.sites: dict[str, list[tuple[str, int]]] = {}  # agent key -> every (file, line) that defines it
-        self.entry_src: list[str | None] = []  # the file each entry / exit came from, by position
-        self.exit_src: list[str | None] = []
         self.role_lists: list[tuple[str, int, list[str]]] = []  # (file, line, names) of default roles lists
 
     # -- helpers ---------------------------------------------------------
@@ -224,7 +220,7 @@ def _imported_modules(tree: ast.AST) -> set[str]:
 
 
 def _frameworks_imported(modules: set[str], src: SourceFile, root: Path) -> list[str]:
-    """Frameworks a file imports. A string in the code (a "crewai.com" User-Agent) is not an import, and
+    """Frameworks a file imports. A framework's name in a URL or a comment is not an import, and
     `from agents import ...` is the OpenAI Agents SDK only when the project has no agents module of its own."""
     found = []
     for fw, prefixes in FRAMEWORK_IMPORTS:
@@ -246,7 +242,7 @@ def _local_module(src: SourceFile, root: Path, name: str) -> bool:
 
 
 def _str_items(node: ast.AST | None) -> list[str]:
-    """["planner", "code_interpreter"] -> its names, when it is a list of two or more identifiers."""
+    """["planner", "coder"] -> its names, when it is a list of two or more identifiers."""
     if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
         return []
     names = [_lit(e) for e in node.elts]
@@ -621,7 +617,7 @@ def _scan_yaml(src: SourceFile, c: _Collector) -> None:
 
 
 def _scan_json(src: SourceFile, c: _Collector) -> None:
-    """Config files can set the default roles list too: {"session.roles": ["planner", "code_interpreter"]}."""
+    """Config files can set the default roles list too: {"app.roles": ["planner", "coder"]}."""
     try:
         data = json.loads(src.text)
     except ValueError:
@@ -701,11 +697,11 @@ def _class_defs(files: list[SourceFile]) -> tuple[list[_ClassDef], set[str]]:
 
 def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
     """Agents a project defines as classes rather than builds from a framework's constructors: subclasses of an
-    agent base (CoStormExpert(Agent), through the project's own classes too) and DSPy programs - dspy.Module
-    subclasses that run predictors of their own (WikiWriter, TopicExpert). A program an agent class holds is that
+    agent base (Reviewer(Agent), through the project's own classes too) and DSPy programs - dspy.Module
+    subclasses that run predictors of their own (an asker, an answerer). A program an agent class holds is that
     agent's tool; a module that calls programs in turn (a writer asking an expert, round after round) is how work
-    flows between them. Where a folder defines agent classes (Co-STORM's modules), the programs next to them are
-    what those agents are built from, not agents of their own; a program nothing creates is not part of a run."""
+    flows between them. A program nothing in the project creates is not part of a run; the others say which
+    classes create them, so the model can tell a pipeline step from a part of something bigger."""
     defs, called = _class_defs(files)
     by_name: dict[str, list[_ClassDef]] = {}
     for d in defs:
@@ -757,7 +753,6 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
                 queue += sorted(held_by.get(h, set()) - seen)
         return None
 
-    agent_dirs = {str(_posix(d.rel).parent) for d in agent_classes}
     created = {n for n in programs if n in called} or set(programs)
     standalone = set()
     for name, d in programs.items():
@@ -767,12 +762,14 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
             if name not in agent["tools"]:
                 agent["tools"].append(name)
             continue
-        if name not in created or str(_posix(d.rel).parent) in agent_dirs:
+        if name not in created:
             continue
-        c.add_agent(name, file=d.rel, line=d.node.lineno, description=d.doc)
+        makers = sorted(held_by.get(name, ()))
+        c.add_agent(name, file=d.rel, line=d.node.lineno, description=d.doc,
+                    role="DSPy program" + (f", created by {', '.join(makers)}" if makers else ""))
         standalone.add(name)
 
-    for d in modules:  # ConvSimulator.forward: the writer asks, the expert answers, for max_turn rounds
+    for d in modules:  # forward(): one program asks, the next answers, for so many rounds
         attrs = {}
         for node in ast.walk(d.node):
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
@@ -800,12 +797,12 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
                     looped = looped or isinstance(cur, (ast.For, ast.AsyncFor, ast.While))
                     cur = parents.get(cur)
         for a, b in zip(order, order[1:]):
-            c.edges.append({"from": a, "to": b, "label": "", "conditional": False, "_file": d.rel})
+            c.edges.append({"from": a, "to": b, "label": "", "conditional": False})
         if looped and len(set(order)) > 1:
-            c.edges.append({"from": order[-1], "to": order[0], "label": "next round", "conditional": True, "_file": d.rel})
+            c.edges.append({"from": order[-1], "to": order[0], "label": "next round", "conditional": True})
 
 
-# -- alternatives -----------------------------------------------------------
+# -- framework and structural facts ---------------------------------------------
 
 
 def _strongest(votes: dict[str, int]) -> str:
@@ -814,13 +811,14 @@ def _strongest(votes: dict[str, int]) -> str:
 
 
 def _framework(c: _Collector) -> str:
-    """What the agents are built with: each agent counts for the framework of the file that defines it, and one
-    on LangChain chat models or no framework counts half - so CAMEL agents outvote framework-free examples, and
-    a LangGraph team outvotes forty files that import LangChain for model calls."""
+    """What the agents are built with: every file that defines an agent counts for its framework, and one on
+    LangChain chat models or no framework counts half - so agents built on a framework outvote framework-free
+    helpers, and a LangGraph team outvotes forty files that import LangChain for model calls."""
     weight: dict[str, float] = {}
-    for a in c.agents.values():
-        fw = _strongest(c.file_votes.get(a["file"], {}))
-        weight[fw] = weight.get(fw, 0) + (0.5 if fw in WEAK_FRAMEWORKS else 1)
+    for key, a in c.agents.items():
+        for file in dict.fromkeys(f for f, _ in c.sites.get(key) or [(a["file"], 0)]):
+            fw = _strongest(c.file_votes.get(file, {}))
+            weight[fw] = weight.get(fw, 0) + (0.5 if fw in WEAK_FRAMEWORKS else 1)
     if weight:
         return max(sorted(weight), key=lambda fw: (weight[fw], fw not in WEAK_FRAMEWORKS, c.frameworks.get(fw, 0)))
     return _strongest(c.frameworks)
@@ -831,7 +829,7 @@ def _posix(rel: str) -> PurePosixPath:
 
 
 def _own_dir(files: set[str], others: set[str]) -> str:
-    """The highest folder holding `files` and none of `others`: multi_agents/ag2 next to multi_agents/agents."""
+    """The highest folder holding `files` and none of `others`: app/autogen_port next to app/team."""
     parts = PurePosixPath(posixpath.commonpath([str(_posix(f).parent) for f in files])).parts
     for i in range(1, len(parts) + 1):
         d = "/".join(parts[:i])
@@ -840,132 +838,60 @@ def _own_dir(files: set[str], others: set[str]) -> str:
     return "/".join(parts)
 
 
-def _drop_ports(c: _Collector) -> list[dict[str, Any]]:
-    """The same team again on another framework (an AG2 copy of a LangGraph team) is an alternative, not more
-    agents. When most of a smaller framework's agents share names with a bigger one's, keep the bigger team -
-    its files, lines and edges - and report the other."""
+def _ports(c: _Collector) -> list[dict[str, Any]]:
+    """Fact: the same agent names defined on two frameworks - most of the smaller group's names are also in the
+    bigger one, each in its own folder. Usually a port of one team; the model decides."""
     groups: dict[str, set[str]] = {}
+    files: dict[str, set[str]] = {}
     for key in c.agents:
         for file, _ in c.sites.get(key, []):
             fw = _strongest(c.file_votes.get(file, {}))
             if fw not in WEAK_FRAMEWORKS:
                 groups.setdefault(fw, set()).add(key)
-    def own_files(fw: str) -> list[PurePosixPath]:
-        return [_posix(f) for k in groups[fw] for f, _ in c.sites[k] if _strongest(c.file_votes.get(f, {})) == fw]
-
-    def port_like(fw: str) -> tuple[bool, int]:
-        """A port usually sits in a folder named after its framework (multi_agents/ag2), a level below the original."""
-        names = {fw, fw.replace("-", "_"), *dict(FRAMEWORK_IMPORTS).get(fw, ())} - {"agents"}
-        return any(n in names for f in own_files(fw) for n in f.parent.parts), min(len(f.parts) for f in own_files(fw))
-
-    ranked = sorted(groups, key=lambda fw: (port_like(fw)[0], -len(groups[fw]), port_like(fw)[1], fw))
-    out: list[dict[str, Any]] = []
-    for fw in ranked[1:]:
-        team, main = groups[fw] & set(c.agents), groups[ranked[0]]
-        shared = team & main
-        if len(shared) < 2 or 2 * len(shared) < len(team):
-            continue
-
-        def files_of(keys: set[str], framework: str) -> set[str]:
-            return {f for k in keys for f, _ in c.sites.get(k, []) if _strongest(c.file_votes.get(f, {})) == framework}
-
-        port, kept = files_of(team, fw), files_of(main, ranked[0])
-        names = [c.agents[k]["name"] for k in sorted(team, key=list(c.agents).index)]
-        for key in team - shared:
-            del c.agents[key]
-        for key in shared:
-            a = c.agents[key]
-            if a["file"] in port:
-                a["file"], a["line"] = next((f, n) for f, n in c.sites[key] if f not in port)
-        c.edges = [e for e in c.edges if e.get("_file") not in port]
-        c.entry = [x for x, src in zip(c.entry, c.entry_src + [None] * len(c.entry)) if src not in port]
-        c.exits = [x for x, src in zip(c.exits, c.exit_src + [None] * len(c.exits)) if src not in port]
-        out.append({"kind": "port", "paths": [_own_dir(port, kept)], "framework": fw, "agents": names,
-                    "note": f"the same agents on {fw}, next to the {ranked[0]} version that is mapped"})
+                files.setdefault(fw, set()).add(file)
+    order = list(c.agents)
+    ranked = sorted(groups, key=lambda fw: (-len(groups[fw]), fw))
+    out = []
+    for i, big in enumerate(ranked):
+        for small in ranked[i + 1:]:
+            shared = groups[big] & groups[small]
+            if len(shared) < 2 or 2 * len(shared) < len(groups[small]):
+                continue
+            out.append({
+                "shared_agents": [c.agents[k]["name"] for k in sorted(shared, key=order.index)],
+                "implementations": [{"framework": fw, "folder": _own_dir(files[fw], files[other]),
+                                     "agents": [c.agents[k]["name"] for k in sorted(groups[fw], key=order.index)]}
+                                    for fw, other in ((big, small), (small, big))],
+            })
     return out
 
 
-def paths_label(paths: list[str]) -> str:
-    """["a/x", "a/y"] -> "a/{x, y}"."""
-    parents = {str(_posix(p).parent) for p in paths}
-    if len(paths) > 1 and len(parents) == 1 and "." not in parents:
-        return f"{parents.pop()}/{{{', '.join(_posix(p).name for p in paths)}}}"
-    return ", ".join(paths)
-
-
-def _drop_showcases(c: _Collector) -> list[dict[str, Any]]:
-    """Apps people built on top of the project (community_usecase/stock-analysis, a cookbook) are not its agents -
-    unless they are all there is."""
-    def showcase(file: str) -> str | None:
-        parts = _posix(file).parts[:-1]
-        return next(("/".join(parts[:i + 1]) for i, p in enumerate(parts) if SHOWCASE_DIR.match(p)), None)
-
-    inside = {key: showcase(a["file"]) for key, a in c.agents.items()}
-    if not any(inside.values()) or all(inside.values()):
-        return []
-    dropped: dict[str, list[str]] = {}
-    for key, root in inside.items():
-        if root and all(showcase(f) for f, _ in c.sites.get(key, [])):
-            dropped.setdefault(root, []).append(c.agents.pop(key)["name"])
-    return [{"kind": "showcase", "paths": [root], "agents": names,
-             "note": "apps built on top of the project, not part of it"} for root, names in sorted(dropped.items())]
-
-
-def _drop_unselected_roles(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]]:
-    """Roles a configuration picks are not all running at once. When a default roles list names role folders
-    (session.roles = ["planner", "code_interpreter"]), what it leaves out is off in a typical run: a variant of a
-    chosen role (code_interpreter_cli_only next to code_interpreter) runs instead of it, and an extra role - a
-    folder with its own role module beside other roles (ext_role/image_reader/image_reader.py) - only when a
-    config switches it on."""
-    dirs: dict[str, set[str]] = {}  # folder name -> its paths
-    for f in files:
-        for d in _posix(f.rel).parents:
-            if str(d) != ".":
-                dirs.setdefault(d.name.lower(), set()).add(str(d))
-    modules = {_posix(f.rel).parent for f in files if f.defines_agent and _posix(f.rel).parent.name == _posix(f.rel).stem}
+def _config_lists(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]]:
+    """Fact: default lists of roles / agents / workers whose names are folders or modules of the project
+    (roles = ["planner", "coder"]), so the model can tell what a default run switches on. A list of chat roles
+    (["user", "assistant"]) names nothing in the project and is not reported."""
+    here = {part.lower() for f in files for part in (*_posix(f.rel).parent.parts, _posix(f.rel).stem)}
+    out, seen = [], set()
     for rel, line, names in c.role_lists:
-        chosen = {n.lower() for n in names}
-        if sum(1 for n in chosen if n in dirs) < 2:
-            continue
-        role_dirs = {d for n in chosen for d in dirs.get(n, ())}
-        siblings = {str(_posix(d).parent) for d in role_dirs}
-        variants: set[str] = set()
-        for a in c.agents.values():
-            folder = _posix(a["file"]).parent
-            if folder.name.lower() not in chosen and any(
-                    str(folder.parent / n) in role_dirs and folder.name.lower().startswith(n + "_") for n in chosen):
-                variants.add(str(folder))
-        extras = {str(m) for m in modules if m.name.lower() not in chosen and str(m) not in variants
-                  and not any(str(m).startswith(d + "/") for d in role_dirs)
-                  and (str(m.parent) in siblings or sum(1 for x in modules if x.parent == m.parent) > 1)}
-        if not variants and not extras:
-            continue
-        out = []
-        for group, what, note in ((variants, "variants of the default roles", "configuration picks one of them"),
-                                  (extras, "roles beyond the default", "a configuration has to switch them on")):
-            if group:
-                gone = [k for k, a in c.agents.items() if any(a["file"].startswith(g + "/") for g in group)]
-                out.append({"kind": "config", "paths": sorted(group), "file": rel, "line": line, "default": names,
-                            "agents": [c.agents.pop(k)["name"] for k in gone],
-                            "note": f"{what} {', '.join(names)} set at {rel}:{line}; {note}"})
-        return out
-    return []
+        if (rel, line) not in seen and sum(1 for n in names if n.lower() in here) >= 2:
+            seen.add((rel, line))
+            out.append({"file": rel, "line": line, "names": names})
+    return out
 
 
 # -- assembly -------------------------------------------------------------
 
 
-def scan(root: Path, files: list[SourceFile] | None = None,
-         alternatives: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Pass a list as `alternatives` to get the implementations left off the map: ports of the same agents to
-    another framework, and role variants a config picks between."""
+def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Pass a dict as `facts` to get structural facts for the LLM: `ports` (the same agent names defined on two
+    frameworks) and `config_lists` (default roles / agents lists naming parts of the project)."""
     root = Path(root).resolve()
     files = files if files is not None else collect(root, max_files=600)
     c = _Collector()
     c.root = root if root.is_dir() else root.parent
     for f in files:
         ext = f.path.suffix.lower()
-        c.file, n_edges, n_entry, n_exits = f.rel, len(c.edges), len(c.entry), len(c.exits)
+        c.file = f.rel
         if ext in {".py", ".ipynb"}:
             _scan_python(f, c)
         elif ext in {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}:
@@ -974,10 +900,6 @@ def scan(root: Path, files: list[SourceFile] | None = None,
             _scan_yaml(f, c)
         elif ext == ".json":
             _scan_json(f, c)
-        for e in c.edges[n_edges:]:
-            e.setdefault("_file", f.rel)
-        c.entry_src += [f.rel] * (len(c.entry) - n_entry)
-        c.exit_src += [f.rel] * (len(c.exits) - n_exits)
     c.file = None
 
     # tasks from YAML fill in CrewAI steps that were declared via config keys
@@ -1064,18 +986,15 @@ def scan(root: Path, files: list[SourceFile] | None = None,
     for e in c.edges:
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
-    left_out = _drop_showcases(c) + _drop_ports(c) + _drop_unselected_roles(c, files)
-    if alternatives is not None:
-        alternatives += left_out
+    if facts is not None:
+        facts.update({k: v for k, v in (("ports", _ports(c)), ("config_lists", _config_lists(c, files))) if v})
     framework = _framework(c)
     names = [a["name"] for a in c.agents.values()]
-    not_drawn = "".join(f" Not drawn: {paths_label(alt['paths'])} ({alt['note']})." for alt in left_out)
     raw = {
         "project": root.name if root.is_dir() else root.stem,
         "framework": framework,
         "summary": (f"Static analysis found {len(names)} agent(s): {', '.join(names[:8])}"
-                    + ("…" if len(names) > 8 else "") + "." + not_drawn
-                    + " Run `visualagents scan --llm` for a richer description.")
+                    + ("…" if len(names) > 8 else "") + ". Run `visualagents scan --llm` for a richer description.")
         if names else "No agents were detected statically. Run `visualagents scan --llm` to analyse the code with an LLM.",
         "agents": list(c.agents.values()),
         "edges": c.edges,

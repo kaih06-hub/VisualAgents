@@ -79,32 +79,25 @@ def _agent(name, file="", line=0):
             "line": line, "aliases": [], "keywords": []}
 
 
-def test_the_llm_map_leaves_out_an_alternative_implementation(monkeypatch, tmp_path):
-    (tmp_path / "multi_agents" / "agents").mkdir(parents=True)
-    (tmp_path / "multi_agents" / "agents" / "orchestrator.py").write_text(
+def test_structural_facts_reach_the_llm_and_its_map_is_kept_as_drawn(monkeypatch, tmp_path):
+    (tmp_path / "team").mkdir()
+    (tmp_path / "team" / "graph.py").write_text(
         "from langgraph.graph import StateGraph\n"
         "g = StateGraph(dict)\n"
         + "".join(f"g.add_node('{n}', {n})\n" for n in ("planner", "researcher", "writer", "reviewer"))
-        + "g.add_edge('planner', 'researcher')\n"
     )
-    (tmp_path / "multi_agents" / "ag2").mkdir()
-    (tmp_path / "multi_agents" / "ag2" / "orchestrator.py").write_text(
+    (tmp_path / "team" / "autogen_version").mkdir()
+    (tmp_path / "team" / "autogen_version" / "chat.py").write_text(
         "from autogen import ConversableAgent\n"
         + "".join(f"{n.lower()} = ConversableAgent(name='{n}', system_message='x')\n"
-                  for n in ("ChiefEditor", "Researcher", "Writer", "Reviewer"))
+                  for n in ("Coordinator", "Researcher", "Writer", "Reviewer"))
     )
-    lg = "multi_agents/agents/orchestrator.py"
     payload = {
-        "project": "gptr", "framework": "langgraph", "summary": "A research team.",
-        "agents": [_agent("Planner", lg, 3), _agent("Researcher", lg, 4), _agent("Writer", lg, 5),
-                   _agent("Reviewer", "multi_agents/ag2/orchestrator.py", 5),  # also in the mapped team: kept
-                   _agent("ChiefEditor", "multi_agents/main.py", 9),  # named like the port's agent
-                   _agent("Coordinator", "multi_agents/ag2/orchestrator.py", 2)],  # defined in the port
-        "edges": [{"from": "planner", "to": "researcher", "label": "", "conditional": False},
-                  {"from": "chief_editor", "to": "coordinator", "label": "", "conditional": False}],
-        "entry": ["planner", "chief_editor"], "exits": ["writer"],
-        "steps": [{"order": 1, "title": "Plan", "agents": ["planner"], "description": ""},
-                  {"order": 2, "title": "Coordinate", "agents": ["chief_editor", "coordinator"], "description": ""}],
+        "project": "team", "framework": "langgraph", "summary": "A research team; an AutoGen version is not drawn.",
+        "agents": [_agent("Planner", "team/graph.py", 3), _agent("Researcher", "team/graph.py", 4),
+                   _agent("Coordinator", "team/autogen_version/chat.py", 2)],
+        "edges": [{"from": "planner", "to": "researcher", "label": "", "conditional": False}],
+        "entry": ["planner"], "exits": ["researcher"], "steps": [],
     }
     captured = {}
     _fake_anthropic(monkeypatch, payload, captured)
@@ -112,12 +105,24 @@ def test_the_llm_map_leaves_out_an_alternative_implementation(monkeypatch, tmp_p
     bp = scanner.scan_project(tmp_path, mode="llm", log=lambda m: None)
 
     hints = captured["messages"][0]["content"].split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0]
-    assert json.loads(hints)["alternatives"][0]["paths"] == ["multi_agents/ag2"]
-    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "writer", "reviewer"]
-    assert bp["edges"] == [{"from": "planner", "to": "researcher", "label": "", "conditional": False}]
-    assert bp["entry"] == ["planner"]
-    assert [s["title"] for s in bp["steps"]] == ["Plan"]
-    assert "Not drawn: multi_agents/ag2" in bp["summary"]
+    folders = {i["framework"]: i["folder"] for i in json.loads(hints)["facts"]["ports"][0]["implementations"]}
+    assert folders == {"langgraph": "team", "autogen": "team/autogen_version"}
+    # the model weighs the facts; nothing it drew is deleted behind its back
+    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "coordinator"]
+
+
+def test_the_scan_prompt_teaches_structures_not_particular_projects():
+    """The guidance is meant to carry over to projects nobody has looked at: patterns, with made-up examples -
+    never the names, classes or folders of the projects it was checked against."""
+    prompt = llm.SCAN_SYSTEM.lower()
+    for structure in ("pipeline:", "router or supervisor:", "turn-taking:", "critic loop:", "planner and executors:",
+                      "fan-out:", "nested team:", "several independent systems:", "alternatives", "opt-in parts:",
+                      "apps built with the project"):
+        assert structure in prompt
+    for particular in ("storm", "wikiwriter", "topicexpert", "taskweaver", "code_interpreter", "cli-only", "owl",
+                       "community_usecase", "gpt-researcher", "ag2", "chiefeditor", "lambda", "voyager", "xagent",
+                       "hedge", "agentlaboratory", "open_deep_research"):
+        assert particular not in prompt, particular
 
 
 def test_every_independent_system_reaches_the_llm(monkeypatch, tmp_path):
@@ -150,7 +155,7 @@ def test_every_independent_system_reaches_the_llm(monkeypatch, tmp_path):
     hints = json.loads(prompt.split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0])
     assert {"WikiWriter", "TopicExpert", "Expert0", "Expert5"} <= {a["name"] for a in hints["agents"]}
     assert '<file path="wiki/curation.py">' in prompt
-    assert "several independent systems" in captured["system"]
+    assert "several independent systems" in captured["system"].lower()
 
 
 def test_refusal_and_truncation_raise(monkeypatch):
