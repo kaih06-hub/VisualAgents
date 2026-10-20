@@ -46,9 +46,10 @@ terminal, on your own machine, with no changes to your code.
 
 ## Highlights
 
-- **Maps any agent repo.** Static analysis understands LangGraph, CrewAI, AutoGen, the OpenAI Agents SDK, Swarm,
-  Google ADK, smolagents, LlamaIndex and raw OpenAI-SDK apps; an optional LLM pass (Claude, GPT, Gemini or a local
-  model) adds roles, tools, handoffs and the step-by-step workflow.
+- **Maps anything that calls an LLM.** Static analysis understands LangGraph, CrewAI, AutoGen, the OpenAI Agents SDK,
+  Swarm, Google ADK, smolagents and LlamaIndex - and with no framework at all, every place that prompts a model is an
+  agent, even if there is only one. An optional LLM pass (Claude, GPT, Gemini or a local model) adds roles, tools,
+  handoffs and the step-by-step workflow.
 - **Live map.** The working agent glows with a thought bubble, handoffs animate along the arrows (with ×N counts
   for loops), workflow steps tick off, and the chain of thought streams beside it — colour-coded per agent.
 - **Rewind and replay.** A time ruler shows every agent's turn. Drag back to any second and the whole dashboard
@@ -57,8 +58,9 @@ terminal, on your own machine, with no changes to your code.
   the project's own virtualenv, and remembers your choices. Or `hook` a folder once and keep running your agent
   however you like.
 - **Precise where it can be, smart where it can't.** Auto-instrumentation gives exact agent boundaries for
-  LangChain/LangGraph, the OpenAI Agents SDK and direct OpenAI-SDK calls; everything else is attributed from the
-  console output, with optional LLM narration.
+  LangChain/LangGraph and the OpenAI Agents SDK, and catches every model call made through OpenAI, Anthropic, Gemini,
+  LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq or Hugging Face; anything else is attributed from
+  the console output, with optional LLM narration.
 - **Interactive.** Drag blocks around (arrows follow), hover a line of thought to make its agent bounce, click an
   agent for its own history, switch light/dark, share a link to an exact moment.
 - **Private by default.** Everything runs on `127.0.0.1`. Your code only goes to an LLM if you pick one, with
@@ -238,7 +240,7 @@ flowchart LR
 
    | Source | When | What you get |
    |---|---|---|
-   | **Auto-instrumentation** | Python apps using LangChain / LangGraph, the OpenAI Agents SDK, or the **OpenAI SDK directly** (any OpenAI-compatible endpoint; sync, async, streaming) | Exact agent boundaries, LLM replies as thoughts, every tool call and result — no code changes. Direct SDK calls are credited to the class or function that made them (e.g. `Programmer`, `Inspector`). Turn off with `--no-instrument`. |
+   | **Auto-instrumentation** | Python apps using LangChain / LangGraph, the OpenAI Agents SDK, or **any LLM library directly**: OpenAI (and compatible endpoints), Anthropic, Gemini, LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq, Hugging Face Inference (sync, async, streaming) | Exact agent boundaries, the prompt as the task, replies and `<think>` reasoning as thoughts, every tool call and result — no code changes. Each model call is credited to the class or function that made it (e.g. `Programmer`, `answer_question`), looking past shared helpers. Turn off with `--no-instrument`. |
    | **Console patterns** | Always | CrewAI (`# Agent: …`, rich panels), AutoGen (`coder (to critic):`), LangGraph stream output, ReAct (`Thought:` / `Action:` / `Observation:` / `Final Answer:`), handoff phrases (`Handing off to Writer`, `transfer_to_billing`), `[Agent] …` prefixes, and tools owned by one agent. |
    | **LLM narration** (`run --smart`) | Optional | Every few seconds an LLM reads the latest output and names the working agent with a one-line summary. |
 
@@ -254,7 +256,7 @@ flowchart LR
 | **CrewAI** | `Agent` / `Task` / `Crew`, `config/agents.yaml` + `tasks.yaml`, hierarchical crews | console format |
 | **AutoGen** 0.2 / 0.4 | agents, `GroupChat`, `RoundRobinGroupChat`, `SelectorGroupChat`, `Swarm`, `initiate_chat` | console format |
 | **OpenAI Agents SDK** | `Agent(handoffs=…)`, `as_tool` | tracing: agent spans, handoffs, tools |
-| **OpenAI SDK, used directly** | classes that create or call an LLM client | each call credited to its class/function, with tool calls and results |
+| **No framework** - OpenAI, Anthropic, Gemini, LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq, Hugging Face, LangChain chat models | every function or class that calls a model is an agent (a shared `generate_reply()`-style helper is not: its callers are); one call site = a one-agent system | each call credited to the code that made it, with its prompt, reply, reasoning, tool calls and results |
 | **Swarm**, **Google ADK**, **smolagents**, **LlamaIndex** | `transfer_to_*`, `sub_agents`, `managed_agents`, `AgentWorkflow` | console patterns, `--smart` |
 | **LangGraph.js**, JS/TS agents | `addNode` / `addEdge`, `new Agent({ name })` | console patterns |
 | **Anything else** | the LLM pass | console patterns, `--smart`, or the SDK below |

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import contextvars
 import functools
 import importlib.abc
 import importlib.util
@@ -26,6 +27,7 @@ import inspect
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -127,8 +129,14 @@ def emit(type, agent=None, text=None, **data):
     if text is not None:
         payload["text"] = _text(text)
     for k, v in data.items():
-        if v is not None:
-            payload[k] = v if isinstance(v, (bool, int, float)) else _text(v, 1000)
+        if v is None:
+            continue
+        if isinstance(v, (bool, int, float)):
+            payload[k] = v
+        elif isinstance(v, (list, tuple)):
+            payload[k] = [_text(x, 200) for x in v][:20]
+        else:
+            payload[k] = _text(v, 1000)
     if not _in_band():
         if _config.get("project"):
             payload["project"] = _config["project"]
@@ -573,23 +581,48 @@ def _is_library(filename):
             or os.path.dirname(os.path.abspath(filename)) == _HERE)
 
 
-def _caller_agent():
-    """Name of the code that made the LLM call: the nearest user class (Programmer, Inspector, ...) or
-    function. Returns False when a framework that reports itself is on the stack."""
-    frame = sys._getframe(2)
-    hint = None
+def _caller_stack():
+    """Names of the user code on the stack, innermost first: a method's class (Programmer, Inspector, ...)
+    followed by Class.method (a shared LLMService serves several agents), a function's name, or the script's
+    file name for top-level code. False when a framework that reports its own agents is on the stack."""
+    frame = sys._getframe(1)
+    names = []
     while frame is not None:
         filename = frame.f_code.co_filename or ""
         if any(m in filename for m in _FRAMEWORK_MARKERS) and _is_library(filename):
             return False
-        if hint is None and not _is_library(filename):
+        if not _is_library(filename):
+            code = frame.f_code.co_name
             self_obj = frame.f_locals.get("self")
+            found = []
             if self_obj is not None:
-                hint = type(self_obj).__name__
-            elif frame.f_code.co_name not in ("<module>", "<lambda>", "<listcomp>", "<genexpr>", "<dictcomp>"):
-                hint = frame.f_code.co_name
+                found = [type(self_obj).__name__]
+                if not code.startswith("<"):
+                    found.append(f"{found[0]}.{code}")
+            elif code == "<module>":
+                found = [os.path.splitext(os.path.basename(filename))[0]]
+            elif not code.startswith("<"):
+                found = [code]
+            names += [n for n in found if n not in names]
         frame = frame.f_back
-    return hint
+    return names[:16]
+
+
+def _caller_agent():
+    """Name of the code that made the LLM call (see _caller_stack); False under a self-reporting framework."""
+    stack = _caller_stack()
+    if stack is False:
+        return False
+    return stack[0] if stack else None
+
+
+def _ensure_armed():
+    """A framework that prints its own agents just called a model: make sure its output reaches the dashboard."""
+    if not _config.get("armed", True) and not _in_band():
+        _arm()
+
+
+_busy = contextvars.ContextVar("visualagents_llm_call", default=False)  # inside a model call we already report
 
 
 def _get(obj, key, default=None):
@@ -598,45 +631,96 @@ def _get(obj, key, default=None):
     return getattr(obj, key, default)
 
 
-class _LLMCall:
+class _Call:
+    """One model call, reported as the code that made it taking a turn: what it asked, what came back."""
+
+    def __init__(self):
+        self.finished = False
+        self.content, self.reasoning, self.tools = [], [], {}
+        busy = _busy.get()
+        stack = False if busy else _caller_stack()
+        self.off = stack is False
+        if self.off:
+            if not busy:
+                _ensure_armed()
+            return
+        self.agent = stack[0] if stack else "LLM"
+        self.hints = stack[1:] or None  # outer callers, so the dashboard can match whichever is on the map
+
+    def emit(self, typ, text=None, **data):
+        emit(typ, self.agent, text, hint=True, hints=self.hints, **data)
+
+    def start(self, task=None, model=None):
+        if self.off:
+            return self
+        if task and _last_task.get(self.agent) == task:
+            task = None  # the same question again (a tool loop): don't repeat it
+        elif task:
+            _last_task[self.agent] = task
+        self.emit("agent_start", task, model=model)
+        return self
+
+    def add(self, content=None, reasoning=None):
+        if isinstance(content, str) and content:
+            self.content.append(content)
+        if isinstance(reasoning, str) and reasoning:
+            self.reasoning.append(reasoning)
+
+    def tool(self, key, name=None, args=None):
+        slot = self.tools.setdefault(key, ["", ""])
+        slot[0] = slot[0] or name or ""
+        if args:
+            slot[1] += args if isinstance(args, str) else json.dumps(args, default=str, ensure_ascii=False)
+
+    def finish(self, error=None):
+        if self.off or self.finished:
+            return
+        self.finished = True
+        text = "".join(self.content).strip()
+        reasoning = "".join(self.reasoning).strip()
+        if not reasoning and "</think>" in text:  # Qwen, DeepSeek-R1...: reasoning inline in <think> tags
+            head, _, text = text.partition("</think>")
+            reasoning, text = head.replace("<think>", "").strip(), text.strip()
+        if reasoning:
+            self.emit("thought", reasoning)
+        if text:
+            self.emit("thought" if self.tools else "output", text)
+        for name, args in self.tools.values():
+            self.emit("tool_start", args, tool=name or "tool")
+        if error is not None:
+            self.emit("error", "%s: %s" % (type(error).__name__, error))
+        self.emit("agent_end")
+
+
+class _LLMCall(_Call):
+    """An OpenAI-style chat completion (openai, groq, litellm, llama.cpp, huggingface_hub)."""
+
     def __init__(self, kwargs):
-        self.agent = _caller_agent()
-        self.off = self.agent is False
+        super().__init__()
         if self.off:
             return
-        self.content = []
-        self.reasoning = []
-        self.tools = {}
-        self.finished = False
-        messages = kwargs.get("messages") or []
+        messages = list(kwargs.get("messages") or [])
         # results of the tools requested last turn arrive as trailing tool/function messages
         results = []
-        for m in reversed(list(messages)):
+        for m in reversed(messages):
             if _get(m, "role") in ("tool", "function"):
                 results.append(m)
             else:
                 break
         for m in reversed(results):
-            emit("tool_end", self.agent, _content_text(_get(m, "content")), tool=_get(m, "name"), hint=True)
-        task = None
-        last_user = next((m for m in reversed(list(messages)) if _get(m, "role") == "user"), None)
-        if last_user is not None:
-            text = _content_text(_get(last_user, "content"))
-            if text and _last_task.get(self.agent) != text:
-                _last_task[self.agent] = text
-                task = text
-        emit("agent_start", self.agent, task, hint=True, model=kwargs.get("model"))
+            self.emit("tool_end", _content_text(_get(m, "content")), tool=_get(m, "name"))
+        self.start(_last_user(messages), kwargs.get("model"))
 
     def absorb_message(self, msg):
         if msg is None:
             return
-        self._add_text(_get(msg, "content"), _get(msg, "reasoning_content") or _get(msg, "reasoning"))
+        self.add(_get(msg, "content"), _get(msg, "reasoning_content") or _get(msg, "reasoning"))
         for i, tc in enumerate(_get(msg, "tool_calls") or []):
             fn = _get(tc, "function")
-            self.tools[i] = [_get(fn, "name") or "tool", _get(fn, "arguments") or ""]
+            self.tool(i, _get(fn, "name") or "tool", _get(fn, "arguments") or "")
         fc = _get(msg, "function_call")
         if fc is not None:
-            self.tools["legacy"] = [_get(fc, "name") or "function", _get(fc, "arguments") or ""]
+            self.tool("legacy", _get(fc, "name") or "function", _get(fc, "arguments") or "")
 
     def absorb_chunk(self, chunk):
         try:
@@ -646,41 +730,23 @@ class _LLMCall:
             delta = _get(choices[0], "delta")
             if delta is None:
                 return
-            self._add_text(_get(delta, "content"), _get(delta, "reasoning_content") or _get(delta, "reasoning"))
+            self.add(_get(delta, "content"), _get(delta, "reasoning_content") or _get(delta, "reasoning"))
             for tc in _get(delta, "tool_calls") or []:
-                slot = self.tools.setdefault(_get(tc, "index", 0), ["", ""])
                 fn = _get(tc, "function")
-                if fn is not None:
-                    slot[0] = slot[0] or _get(fn, "name") or ""
-                    slot[1] += _get(fn, "arguments") or ""
+                self.tool(_get(tc, "index", 0), _get(fn, "name") if fn is not None else None,
+                          _get(fn, "arguments") if fn is not None else None)
             fc = _get(delta, "function_call")
             if fc is not None:
-                slot = self.tools.setdefault("legacy", ["", ""])
-                slot[0] = slot[0] or _get(fc, "name") or ""
-                slot[1] += _get(fc, "arguments") or ""
+                self.tool("legacy", _get(fc, "name"), _get(fc, "arguments"))
         except Exception:
             pass
 
-    def _add_text(self, content, reasoning):
-        if isinstance(content, str) and content:
-            self.content.append(content)
-        if isinstance(reasoning, str) and reasoning:
-            self.reasoning.append(reasoning)
 
-    def finish(self, error=None):
-        if self.off or self.finished:
-            return
-        self.finished = True
-        if self.reasoning:
-            emit("thought", self.agent, "".join(self.reasoning).strip(), hint=True)
-        text = "".join(self.content).strip()
-        if text:
-            emit("thought" if self.tools else "output", self.agent, text, hint=True)
-        for name, args in self.tools.values():
-            emit("tool_start", self.agent, args, tool=name or "tool", hint=True)
-        if error is not None:
-            emit("error", self.agent, "%s: %s" % (type(error).__name__, error), hint=True)
-        emit("agent_end", self.agent, hint=True)
+def _last_user(messages):
+    if not isinstance(messages, (list, tuple)):
+        return None
+    last_user = next((m for m in reversed(list(messages)) if _get(m, "role") == "user"), None)
+    return _content_text(_get(last_user, "content")) if last_user is not None else None
 
 
 def _content_text(content):
@@ -693,9 +759,10 @@ def _content_text(content):
 class _StreamProxy:
     """Passes a streamed completion through untouched while collecting what the model said."""
 
-    def __init__(self, stream, call):
+    def __init__(self, stream, call, feed=None):
         self._stream = stream
         self._call = call
+        self._feed = feed
         self._it = None
 
     def __iter__(self):
@@ -704,6 +771,7 @@ class _StreamProxy:
     def __next__(self):
         if self._it is None:
             self._it = iter(self._stream)
+        token = _busy.set(True)
         try:
             chunk = next(self._it)
         except StopIteration:
@@ -712,8 +780,19 @@ class _StreamProxy:
         except BaseException as exc:
             self._call.finish(exc)
             raise
-        self._call.absorb_chunk(chunk)
+        finally:
+            _busy.reset(token)
+        self._absorb(chunk)
         return chunk
+
+    def _absorb(self, chunk):
+        try:
+            if self._feed is not None:
+                self._feed(self._call, chunk)
+            else:
+                self._call.absorb_chunk(chunk)
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
@@ -742,6 +821,7 @@ class _AsyncStreamProxy(_StreamProxy):
     async def __anext__(self):
         if self._it is None:
             self._it = self._stream.__aiter__()
+        token = _busy.set(True)
         try:
             chunk = await self._it.__anext__()
         except StopAsyncIteration:
@@ -750,7 +830,9 @@ class _AsyncStreamProxy(_StreamProxy):
         except BaseException as exc:
             self._call.finish(exc)
             raise
-        self._call.absorb_chunk(chunk)
+        finally:
+            _busy.reset(token)
+        self._absorb(chunk)
         return chunk
 
     async def __aenter__(self):
@@ -816,9 +898,417 @@ def _hook_openai(_module=None):
         cls.create = create
 
 
+# -- any other LLM library: each call is the calling code taking a turn ---------------------
+
+def _patch(owner, attr, begin, on_result=None, on_chunk=None, streams=None, manager=False):
+    """Wrap a library function or method so every call is reported. begin(args, kwargs) -> _Call; on_result
+    reads a full response, on_chunk one streamed piece; streams(args, kwargs, result) says it is a stream."""
+    original = getattr(owner, attr, None)
+    if original is None or getattr(original, "_visualagents", False):
+        return
+
+    def _begin(args, kwargs):
+        if _busy.get():
+            return None  # made by a call we already report (retries, wrappers, generate -> stream_generate)
+        try:
+            call = begin(args, kwargs)
+        except Exception:
+            return None
+        return None if call is None or call.off else call
+
+    def _after(call, result, args, kwargs):
+        try:
+            if manager:
+                return _ManagerProxy(result, call, on_result)
+            streaming = streams(args, kwargs, result) if streams else (
+                inspect.isgenerator(result) or inspect.isasyncgen(result))
+            if streaming and on_chunk is not None:
+                proxy = _AsyncStreamProxy if hasattr(result, "__aiter__") else _StreamProxy
+                return proxy(result, call, on_chunk)
+            if on_result is not None:
+                on_result(call, result)
+        except Exception:
+            pass
+        call.finish()
+        return result
+
+    async def _awaited(call, awaitable, args, kwargs):
+        token = _busy.set(True)
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            call.finish(exc)
+            raise
+        finally:
+            _busy.reset(token)
+        return _after(call, result, args, kwargs)
+
+    if inspect.iscoroutinefunction(original):
+        async def wrapper(*args, **kwargs):
+            call = _begin(args, kwargs)
+            if call is None:
+                return await original(*args, **kwargs)
+            return await _awaited(call, original(*args, **kwargs), args, kwargs)
+    else:
+        def wrapper(*args, **kwargs):
+            call = _begin(args, kwargs)
+            if call is None:
+                return original(*args, **kwargs)
+            token = _busy.set(True)
+            try:
+                result = original(*args, **kwargs)
+            except BaseException as exc:
+                call.finish(exc)
+                raise
+            finally:
+                _busy.reset(token)
+            if inspect.isawaitable(result):  # an async method behind a sync decorator
+                return _awaited(call, result, args, kwargs)
+            return _after(call, result, args, kwargs)
+    try:
+        functools.update_wrapper(wrapper, original)
+    except Exception:
+        pass
+    wrapper._visualagents = True
+    setattr(owner, attr, wrapper)
+
+
+class _ManagerProxy:
+    """`with client.messages.stream(...) as stream:` - the reply is reported when the block ends."""
+
+    def __init__(self, manager, call, on_result):
+        self._m, self._call, self._on_result, self._s = manager, call, on_result, None
+
+    def __enter__(self):
+        self._s = self._m.__enter__()
+        return self._s
+
+    def __exit__(self, *exc):
+        try:
+            return self._m.__exit__(*exc)
+        finally:
+            self._done(exc[1])
+
+    async def __aenter__(self):
+        self._s = await self._m.__aenter__()
+        return self._s
+
+    async def __aexit__(self, *exc):
+        try:
+            return await self._m.__aexit__(*exc)
+        finally:
+            self._done(exc[1])
+
+    def _done(self, error):
+        try:
+            snapshot = getattr(self._s, "current_message_snapshot", None)
+            if snapshot is not None and self._on_result:
+                self._on_result(self._call, snapshot)
+        except Exception:
+            pass
+        self._call.finish(error)
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+
+def _stream_kwarg(args, kwargs, result):
+    return bool(kwargs.get("stream"))
+
+
+def _always(args, kwargs, result):
+    return True
+
+
+def _arg(args, kwargs, name, index):
+    """A parameter passed by name or position (index counts `self` for methods)."""
+    if name in kwargs:
+        return kwargs[name]
+    return args[index] if len(args) > index else None
+
+
+def _openai_shaped(args, kwargs, messages_index=1):
+    """litellm.completion(model, messages), Llama.create_chat_completion(self, messages), ..."""
+    kw = dict(kwargs)
+    if "messages" not in kw and len(args) > messages_index:
+        kw["messages"] = args[messages_index]
+    return _LLMCall(kw)
+
+
+def _openai_result(call, result):
+    choices = _get(result, "choices") or []
+    call.absorb_message(_get(choices[0], "message") if choices else None)
+
+
+def _openai_chunk(call, chunk):
+    call.absorb_chunk(chunk)
+
+
+_TURN = re.compile(r"<\|im_start\|>user|<\|start_header_id\|>user<\|end_header_id\|>|\[INST\]|<start_of_turn>user|"
+                   r"<\|user\|>|^### (?:User|Instruction|Human):|^(?:User|Human):", re.I | re.M)
+
+
+def _prompt_text(prompt):
+    """The last user turn of a prompt already rendered with a chat template (local models)."""
+    if not isinstance(prompt, str):
+        return None
+    turns = list(_TURN.finditer(prompt))
+    text = prompt[turns[-1].end():] if turns else prompt
+    text = re.sub(r"<\|[^|>]{1,40}\|>|</?s>|\[/INST\]|<end_of_turn>|<start_of_turn>model|<think>\s*</think>", " ", text)
+    text = re.sub(r"\s*\b(assistant|model)\s*$", "", text.strip(), flags=re.I)
+    return text.strip()[:4000] or None
+
+
+def _simple_call(task=None, model=None):
+    call = _Call()
+    return call if call.off else call.start(task, model)
+
+
+# Anthropic: messages.create (plain or stream=True) and messages.stream(...)
+def _anthropic_begin(args, kwargs):
+    call = _Call()
+    if call.off:
+        return call
+    messages = list(kwargs.get("messages") or [])
+    last = messages[-1] if messages else None
+    if last is not None and _get(last, "role") == "user" and isinstance(_get(last, "content"), list):
+        for block in _get(last, "content"):
+            if _get(block, "type") == "tool_result":
+                call.emit("tool_end", _content_text(_get(block, "content")))
+    return call.start(_last_user(messages), kwargs.get("model"))
+
+
+def _anthropic_result(call, message):
+    for i, block in enumerate(_get(message, "content") or []):
+        kind = _get(block, "type")
+        if kind == "text":
+            call.add(_get(block, "text"))
+        elif kind == "thinking":
+            call.add(reasoning=_get(block, "thinking"))
+        elif kind in ("tool_use", "server_tool_use", "mcp_tool_use"):
+            call.tool(i, _get(block, "name"), _get(block, "input"))
+
+
+def _anthropic_chunk(call, event):
+    kind = _get(event, "type")
+    if kind == "content_block_start":
+        block = _get(event, "content_block")
+        if _get(block, "type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+            call.tool(_get(event, "index", 0), _get(block, "name"))
+    elif kind == "content_block_delta":
+        delta = _get(event, "delta")
+        dkind = _get(delta, "type")
+        if dkind == "text_delta":
+            call.add(_get(delta, "text"))
+        elif dkind == "thinking_delta":
+            call.add(reasoning=_get(delta, "thinking"))
+        elif dkind == "input_json_delta":
+            call.tool(_get(event, "index", 0), None, _get(delta, "partial_json"))
+
+
+def _hook_anthropic(_module=None):
+    for modname in ("anthropic.resources.messages", "anthropic.resources.beta.messages"):
+        try:
+            mod = importlib.import_module(modname)
+        except Exception:
+            continue
+        for cls_name in ("Messages", "AsyncMessages"):
+            cls = getattr(mod, cls_name, None)
+            if cls is not None:
+                _patch(cls, "create", _anthropic_begin, _anthropic_result, _anthropic_chunk, streams=_stream_kwarg)
+                _patch(cls, "stream", _anthropic_begin, _anthropic_result, manager=True)
+
+
+# Google Gemini: google-genai (client.models.generate_content[_stream]) and the older google-generativeai
+def _genai_text(contents):
+    if isinstance(contents, str):
+        return contents
+    if isinstance(contents, (list, tuple)):
+        if not contents:
+            return None
+        if all(isinstance(c, str) for c in contents):
+            return "\n".join(contents)
+        contents = contents[-1]  # the latest turn
+    if isinstance(contents, str):
+        return contents
+    texts = [_get(p, "text") for p in (_get(contents, "parts") or [])]
+    return "\n".join(t for t in texts if isinstance(t, str)) or None
+
+
+def _genai_begin(args, kwargs):
+    return _simple_call(_genai_text(kwargs.get("contents")), kwargs.get("model"))
+
+
+def _genai_legacy_begin(args, kwargs):
+    return _simple_call(_genai_text(_arg(args, kwargs, "contents", 1)), _get(args[0], "model_name") if args else None)
+
+
+def _genai_result(call, response):
+    for candidate in (_get(response, "candidates") or [])[:1]:
+        for part in _get(_get(candidate, "content"), "parts") or []:
+            text = _get(part, "text")
+            if isinstance(text, str) and text:
+                call.add(None, text) if _get(part, "thought") else call.add(text)
+            fc = _get(part, "function_call")
+            if fc is not None:
+                call.tool(("fc", len(call.tools)), _get(fc, "name"), _get(fc, "args"))
+
+
+def _hook_genai(_module=None):
+    mod = importlib.import_module("google.genai.models")
+    for cls_name in ("Models", "AsyncModels"):
+        cls = getattr(mod, cls_name, None)
+        if cls is not None:
+            _patch(cls, "generate_content", _genai_begin, _genai_result)
+            _patch(cls, "generate_content_stream", _genai_begin, None, _genai_result, streams=_always)
+
+
+def _hook_genai_legacy(module):
+    cls = getattr(module, "GenerativeModel", None)
+    if cls is not None:
+        _patch(cls, "generate_content", _genai_legacy_begin, _genai_result, _genai_result, streams=_stream_kwarg)
+        _patch(cls, "generate_content_async", _genai_legacy_begin, _genai_result, _genai_result, streams=_stream_kwarg)
+
+
+# LiteLLM: litellm.completion / acompletion (OpenAI-shaped responses)
+def _hook_litellm(module):
+    for name in ("completion", "acompletion"):
+        _patch(module, name, _openai_shaped, _openai_result, _openai_chunk, streams=_stream_kwarg)
+
+
+# Ollama: ollama.chat / ollama.generate and Client / AsyncClient
+def _ollama_result(call, response):
+    message = _get(response, "message")
+    if message is not None:
+        call.add(_get(message, "content"), _get(message, "thinking"))
+        for tc in _get(message, "tool_calls") or []:
+            fn = _get(tc, "function")
+            call.tool(("t", len(call.tools)), _get(fn, "name"), _get(fn, "arguments"))
+    else:
+        call.add(_get(response, "response"), _get(response, "thinking"))
+
+
+def _hook_ollama(module):
+    client_mod = sys.modules.get("ollama._client") or importlib.import_module("ollama._client")
+    chat = lambda a, k: _simple_call(_last_user(_arg(a, k, "messages", 2)), _arg(a, k, "model", 1))  # noqa: E731
+    generate = lambda a, k: _simple_call(_arg(a, k, "prompt", 2), _arg(a, k, "model", 1))  # noqa: E731
+    for cls_name in ("Client", "AsyncClient"):
+        cls = getattr(client_mod, cls_name, None)
+        if cls is not None:
+            _patch(cls, "chat", chat, _ollama_result, _ollama_result, streams=_stream_kwarg)
+            _patch(cls, "generate", generate, _ollama_result, _ollama_result, streams=_stream_kwarg)
+    default = getattr(module, "_client", None)
+    if default is not None:  # ollama.chat / ollama.generate are bound methods of a default client
+        for name in ("chat", "generate"):
+            if hasattr(module, name):
+                setattr(module, name, getattr(default, name))
+
+
+# mlx-lm (Apple silicon): generate(model, tokenizer, prompt) and stream_generate(...)
+def _hook_mlx_lm(module):
+    begin = lambda a, k: _simple_call(_prompt_text(_arg(a, k, "prompt", 2)))  # noqa: E731
+    for owner in (module, sys.modules.get("mlx_lm.generate")):
+        if inspect.ismodule(owner):
+            _patch(owner, "generate", begin, lambda call, text: call.add(text if isinstance(text, str) else None))
+            _patch(owner, "stream_generate", begin, None, lambda call, r: call.add(_get(r, "text")), streams=_always)
+
+
+# llama.cpp: Llama.create_chat_completion / create_completion (and llm(prompt))
+def _completion_text(call, response):
+    choices = _get(response, "choices") or []
+    call.add(_get(choices[0], "text") if choices else None)
+
+
+def _hook_llama_cpp(module):
+    cls = getattr(module, "Llama", None)
+    if cls is None:
+        return
+    _patch(cls, "create_chat_completion", _openai_shaped, _openai_result, _openai_chunk, streams=_stream_kwarg)
+    _patch(cls, "create_completion", lambda a, k: _simple_call(_arg(a, k, "prompt", 1)),
+           _completion_text, _completion_text, streams=_stream_kwarg)
+
+
+# transformers: text-generation pipelines, and model.generate for everything else
+def _tf_pipe_begin(args, kwargs):
+    inputs = _arg(args, kwargs, "text_inputs", 1)
+    if isinstance(inputs, (list, tuple)) and inputs and isinstance(inputs[0], dict):
+        return _simple_call(_last_user(inputs))
+    return _simple_call(inputs if isinstance(inputs, str) else None)
+
+
+def _tf_pipe_result(call, out):
+    item = out[0] if isinstance(out, list) and out else out
+    if isinstance(item, list) and item:
+        item = item[0]
+    text = _get(item, "generated_text")
+    if isinstance(text, list) and text:
+        text = _get(text[-1], "content")
+    call.add(text if isinstance(text, str) else None)
+
+
+def _hook_tf_pipeline(module):
+    cls = getattr(module, "TextGenerationPipeline", None)
+    if cls is not None:
+        _patch(cls, "__call__", _tf_pipe_begin, _tf_pipe_result)
+
+
+def _hook_tf_generate(module):
+    cls = getattr(module, "GenerationMixin", None)
+    if cls is not None:
+        _patch(cls, "generate", lambda a, k: _simple_call())
+
+
+# vLLM: LLM.generate / LLM.chat
+def _vllm_begin(args, kwargs):
+    p = _arg(args, kwargs, "prompts", 1)
+    if p is None:
+        p = kwargs.get("messages")
+    if isinstance(p, (list, tuple)) and p and isinstance(p[0], dict):
+        return _simple_call(_last_user(p))
+    if isinstance(p, (list, tuple)) and p and isinstance(p[0], str):
+        return _simple_call(p[0] if len(p) == 1 else "%d prompts" % len(p))
+    return _simple_call(p if isinstance(p, str) else None)
+
+
+def _vllm_result(call, outputs):
+    for out in list(outputs or [])[:1]:
+        for completion in list(_get(out, "outputs") or [])[:1]:
+            call.add(_get(completion, "text"))
+
+
+def _hook_vllm(module):
+    cls = getattr(module, "LLM", None)
+    if cls is not None:
+        for name in ("generate", "chat"):
+            _patch(cls, name, _vllm_begin, _vllm_result)
+
+
+# OpenAI-compatible SDKs that are not the openai package
+def _hook_groq(_module=None):
+    mod = importlib.import_module("groq.resources.chat.completions")
+    for cls_name in ("Completions", "AsyncCompletions"):
+        cls = getattr(mod, cls_name, None)
+        if cls is not None:
+            _patch(cls, "create", lambda a, k: _LLMCall(k), _openai_result, _openai_chunk, streams=_stream_kwarg)
+
+
+def _hook_hf_inference(module):
+    for cls_name in ("InferenceClient", "AsyncInferenceClient"):
+        cls = getattr(module, cls_name, None)
+        if cls is not None:
+            _patch(cls, "chat_completion", _openai_shaped, _openai_result, _openai_chunk, streams=_stream_kwarg)
+
+
 # -- import hooks -----------------------------------------------------------------
 
-_HOOKS = {"langchain_core.callbacks.manager": _hook_langchain, "agents": _hook_openai_agents, "openai": _hook_openai}
+_HOOKS = {
+    "langchain_core.callbacks.manager": _hook_langchain, "agents": _hook_openai_agents, "openai": _hook_openai,
+    "anthropic": _hook_anthropic, "google.genai": _hook_genai, "google.generativeai": _hook_genai_legacy,
+    "litellm": _hook_litellm, "ollama": _hook_ollama, "mlx_lm": _hook_mlx_lm, "llama_cpp": _hook_llama_cpp,
+    "transformers.pipelines.text_generation": _hook_tf_pipeline, "transformers.generation.utils": _hook_tf_generate,
+    "vllm": _hook_vllm, "groq": _hook_groq, "huggingface_hub.inference._client": _hook_hf_inference,
+    "huggingface_hub.inference._generated._async_client": _hook_hf_inference,
+}
 
 
 class _PostImportFinder(importlib.abc.MetaPathFinder):

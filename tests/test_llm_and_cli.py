@@ -68,6 +68,7 @@ def test_scan_uses_structured_output_and_merges_static_aliases(monkeypatch, tmp_
     assert captured["output_config"]["format"]["type"] == "json_schema"
     assert captured["output_config"]["effort"] == "high"
     assert "<static_analysis_hints>" in captured["messages"][0]["content"]
+    assert "<repo_outline>" in captured["messages"][0]["content"]  # every file's shape, not just the ones in full
     assert bp["generated_by"] == "anthropic:claude-opus-5-5"
     assert [a["id"] for a in bp["agents"]] == ["planner", "writer"]
     assert "Writer" in bp["agents"][1]["aliases"] or bp["agents"][1]["name"] == "Writer"

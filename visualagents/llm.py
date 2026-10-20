@@ -285,18 +285,37 @@ Guidelines:
 distinct reasoning step. Tools, LLM clients, routers that make no LLM call, and plain helpers are not agents; \
 list a tool under the agent that calls it.
 - A single-agent program yields one agent. Do not invent agents the code does not define.
+- Without an agent framework, every distinct place that prompts a model for its own purpose is an agent \
+(an answerer, a planner, a summariser, an extractor), even if they share one model or one client. A shared \
+helper that only forwards a prompt it was given (e.g. generate_reply(system_prompt, user_content)) is plumbing, \
+not an agent: the functions that call it with their own prompts are the agents. A program with one such place \
+is a one-agent system.
+- The agent is where its system prompt is written and its loop runs (often a request handler or a run() \
+method), not the client class that sends the request: an LLMService / ModelClient whose methods take messages \
+and pass them on is plumbing, as are code executors, kernels, sandboxes, databases and file exporters with no \
+prompt of their own. Name the agent after its prompt ("You are LAMBDA, a data analysis agent" -> LAMBDA).
+- One agent that loops - call the model, run the code or tools it asks for, read the output or error, fix and \
+retry - is still one agent. Show that loop through steps (e.g. plan, write code, run it, inspect errors and fix, \
+report) instead of inventing a separate programmer or inspector the code does not define.
 - ids are stable snake_case names taken from the code: LangGraph node names, CrewAI agents.yaml keys, \
 Agent(name=...) values, AutoGen agent names.
 - aliases: every string that may identify the agent in logs - node name, variable names, class name, the \
 name= value, CrewAI role text with template variables removed. Always include the name of the class (or \
-function) that actually makes the LLM calls for this agent, e.g. the class holding the OpenAI client.
+function) that builds this agent's prompt and calls the model, e.g. a Programmer class holding its own OpenAI \
+client - never a class or helper shared by several agents, such as a common LLMService.
 - keywords: 3-8 distinctive words or short phrases this agent's own output is likely to contain.
 - edges: handoffs / control flow (who passes work to whom). conditional=true when a router, supervisor or \
 LLM decision picks the next agent. Include loops such as critic -> writer.
 - entry: the agents that receive the user's query first. exits: the agents that produce the final answer.
 - steps: the general blueprint a typical query moves through, as 2-8 ordered phases, each naming its agents.
 - file and line: where the agent is defined (use the line numbers shown in the source). line=0 if unsure.
-- Static-analysis hints are provided; trust them for names, correct them when the code says otherwise."""
+- The source starts with <repo_outline>: every source file with its classes (and their base classes), \
+functions and prompt personas, each with its line number - including files not shown in full. The files after it \
+are the most relevant ones; those marked excerpt show only selected lines. An agent you can only see in the \
+outline (another subclass of the same agent base class, another module of the same pipeline) is still an agent: \
+include it, with the outline's file and line.
+- Static-analysis hints are heuristic: reuse their names, aliases and line numbers, but drop hint agents the \
+source shows are plumbing and add agents the hints missed."""
 
 NARRATE_SYSTEM = """You watch the live console output of a multi-agent AI program for VisualAgents. Given the \
 program's agents and its most recent log lines, decide which agent is working right now and describe what it \

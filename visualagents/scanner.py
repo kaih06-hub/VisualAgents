@@ -39,7 +39,8 @@ def scan_project(
             "(add a key for a richer map; see `visualagents models`).")
         return static
 
-    source, included = pack(files, budget_chars=max_chars)
+    # files static analysis found agents in are sent in full first, whatever their keyword score
+    source, included = pack(files, budget_chars=max_chars, prefer={a["file"] for a in static["agents"] if a.get("file")})
     hints = {k: static[k] for k in ("framework", "agents", "edges", "entry", "exits", "steps")}
     for a in hints["agents"]:
         a.pop("keywords", None)
@@ -50,7 +51,9 @@ def scan_project(
         "Return the blueprint for this project."
     )
     used_model = model or llm.default_model(chosen)
-    log(f"Asking {chosen}:{used_model} to map the agents ({len(included)} file(s), {len(source):,} chars)…")
+    cut = sum(1 for i in included if i.endswith(" (excerpt)"))
+    log(f"Asking {chosen}:{used_model} to map the agents (outline of the project + {len(included)} file(s)"
+        + (f", {cut} cut to excerpts" if cut else "") + f", {len(source):,} chars)…")
     try:
         raw = llm.complete_json(
             provider=chosen, model=used_model, system=llm.SCAN_SYSTEM, prompt=prompt, schema=bpmod.BLUEPRINT_JSON_SCHEMA

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Anything that calls an LLM is an agent system, with or without a framework, one agent or many:
+  - the map: every function or class that calls a model is an agent; a shared helper that only forwards a prompt is
+    not - the functions that call it with their own prompts are. Recognised through OpenAI, Anthropic, Gemini,
+    LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq, Hugging Face and LangChain chat models.
+  - live: those libraries are hooked like the OpenAI SDK already was - each call shows the prompt, the reply,
+    `<think>` reasoning and tool calls, credited to the code that made it (looking past shared helpers).
+  - an app with no mapped agents shows each caller as its own agent instead of nothing.
+  - hook mode now wakes for CrewAI, AutoGen and other frameworks that print their own agents.
+
+### Fixed
+- Start-command detection: a project's own console scripts in its README count as start commands, an interactive
+  chat command is preferred over a server or a web front end in a subfolder, and they run from the project's
+  virtualenv. A missing command now says so instead of exiting silently.
+- Apps built around a shared LLM client class (e.g. LAMBDA's `LLMService`) map to the agents that use it: the
+  agent is the code that writes the system prompt and runs the loop, named after its prompt ("You are LAMBDA, ..."),
+  with the tools it hands the model. The client wrapper and code kernels are no longer shown as agents, and calls
+  made from another asyncio task still light up the right agent.
+
 ## 0.1.1 — 2026-10-19
 
 ### Fixed
