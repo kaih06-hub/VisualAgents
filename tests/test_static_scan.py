@@ -320,18 +320,53 @@ _ROLES = {
 }
 
 
-def test_role_variants_a_config_picks_between_are_not_parallel_workers(tmp_path):
+def test_roles_the_default_config_leaves_out_are_not_parallel_workers(tmp_path):
     _write(tmp_path, _ROLES)
+    _write(tmp_path, {
+        "app/ext_role/web_search/web_search.py": "class WebSearch(Role):\n    pass\n",
+        "app/llm/openai_api.py": (  # not a role folder: a model client stays whatever static analysis made of it
+            "class ChatCompletion:\n"
+            "    def run(self, client, system_prompt):\n"
+            "        return client.chat.completions.create(model='m', messages=[{'role': 'system', 'content': 'x'}])\n"
+        ),
+    })
     alternatives = []
     bp = scan(tmp_path, alternatives=alternatives)
     names = {a["name"] for a in bp["agents"]}
-    assert {"Planner", "CodeGenerator", "ImageReader"} <= names  # an optional extra role is not a variant
-    assert not names & {"CodeGeneratorCLIOnly", "CodeGeneratorPluginOnly"}
-    alt = alternatives[0]
-    assert alt["kind"] == "config" and alt["default"] == ["planner", "code_interpreter"]
-    assert alt["file"] == "app/session/session.py" and alt["line"] == 3
-    assert alt["paths"] == ["app/code_interpreter/code_interpreter_cli_only",
-                            "app/code_interpreter/code_interpreter_plugin_only"]
+    assert {"Planner", "CodeGenerator"} <= names
+    assert not names & {"CodeGeneratorCLIOnly", "CodeGeneratorPluginOnly", "ImageReader"}
+    variants, extras = alternatives
+    assert variants["kind"] == extras["kind"] == "config"
+    assert variants["default"] == ["planner", "code_interpreter"]
+    assert variants["file"] == "app/session/session.py" and variants["line"] == 3
+    assert variants["paths"] == ["app/code_interpreter/code_interpreter_cli_only",
+                                 "app/code_interpreter/code_interpreter_plugin_only"]
+    # extra roles a config has to switch on, found by their role module even when no agent was detected there
+    assert extras["paths"] == ["app/ext_role/image_reader", "app/ext_role/web_search"]
+    assert extras["agents"] == ["ImageReader"]
+    assert "app/ext_role/{image_reader, web_search}" in bp["summary"]
+
+
+def test_apps_built_on_the_project_in_community_folders_are_not_its_agents(tmp_path):
+    _write(tmp_path, {
+        "owl/utils/role_playing.py": (
+            "from camel.agents import ChatAgent\n"
+            "user_agent = ChatAgent(system_message='You give instructions')\n"
+            "assistant_agent = ChatAgent(system_message='You solve the task')\n"
+        ),
+        "community_usecase/stock_app/main.py": (
+            "".join(f"a{i} = Analyst{i}Agent(model_name=m)\n" for i in range(4))
+        ),
+        "community_usecase/stock_app/agents/base.py": "from camel.agents import ChatAgent\n",
+    })
+    alternatives = []
+    bp = scan(tmp_path, alternatives=alternatives)
+    assert {a["id"] for a in bp["agents"]} == {"user_agent", "assistant_agent"}
+    assert alternatives[0]["kind"] == "showcase" and alternatives[0]["paths"] == ["community_usecase"]
+    # ...but when the community folder is all there is, it is the project
+    only = tmp_path / "only"
+    _write(only, {"use_cases/stock/main.py": "a = AnalystAgent(model_name=m)\n"})
+    assert [a["id"] for a in scan(only)["agents"]] == ["a"]
 
 
 def test_a_roles_list_of_chat_roles_changes_nothing(tmp_path):

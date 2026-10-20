@@ -20,6 +20,16 @@
   agent is the code that writes the system prompt and runs the loop, named after its prompt ("You are LAMBDA, ..."),
   with the tools it hands the model. The client wrapper and code kernels are no longer shown as agents, and calls
   made from another asyncio task still light up the right agent.
+- A repository with several independent systems maps all of them (STORM's wiki pipeline next to Co-STORM), and
+  DSPy programs (`dspy.Module`s with their own predictors) and subclasses of an agent base class are agents; a
+  program an agent holds is its tool, and one that calls programs in turn gives their handoffs.
+- Alternatives are no longer drawn as more agents: a port of the same team to another framework (gpt-researcher's
+  `multi_agents/ag2`), role variants a config default picks between (TaskWeaver's CLI-only and plugin-only code
+  generators), roles a config has to switch on, and apps built on top of the project in community / use-case /
+  cookbook folders are left off the map and named in the summary.
+- The framework badge comes from what the agents' own files import: OWL is CAMEL rather than CrewAI, a LangGraph
+  team is LangGraph even when forty other files import LangChain for model calls, and a project's own `agents.py`
+  is not the OpenAI Agents SDK.
 
 ## 0.1.1 — 2026-10-19
 

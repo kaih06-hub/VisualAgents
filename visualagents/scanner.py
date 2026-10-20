@@ -9,6 +9,7 @@ from typing import Any, Callable
 from . import blueprint as bpmod
 from . import llm
 from .collector import collect, pack
+from .static_scan import paths_label
 from .static_scan import scan as static_scan
 
 
@@ -30,7 +31,7 @@ def scan_project(
     static = static_scan(project, files, alternatives)
     log(f"Static analysis: {len(static['agents'])} agent(s), {len(static['edges'])} edge(s), framework={static['framework']}")
     for alt in alternatives:
-        log(f"Not mapping {', '.join(alt['paths'])}: {alt['note']}")
+        log(f"Not mapping {paths_label(alt['paths'])}: {alt['note']}")
     if mode == "static":
         return static
 
@@ -106,7 +107,7 @@ def _drop_alternatives(bp: dict[str, Any], alternatives: list[dict[str, Any]], s
     raw["exits"] = [x for x in bp["exits"] if x not in ids]
     raw["steps"] = [dict(s, agents=[x for x in s["agents"] if x not in ids]) for s in bp["steps"]
                     if not s["agents"] or set(s["agents"]) - ids]  # a step of nothing but alternatives goes too
-    raw["summary"] = (bp["summary"] + "".join(f" Not drawn: {', '.join(alt['paths'])} ({alt['note']})."
+    raw["summary"] = (bp["summary"] + "".join(f" Not drawn: {paths_label(alt['paths'])} ({alt['note']})."
                                               for alt in alternatives)).strip()
     return bpmod.normalize(raw)
 

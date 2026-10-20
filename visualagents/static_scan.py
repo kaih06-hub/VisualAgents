@@ -59,6 +59,8 @@ DSPY_PREDICTORS = {"Predict", "ChainOfThought", "ChainOfThoughtWithHint", "ReAct
                    "MultiChainComparison", "TypedPredictor", "TypedChainOfThought", "Refine", "BestOfN", "CodeAct"}
 # config keys that list the roles a run uses: session.roles, default_agents, WORKERS
 ROLE_LIST_KEY = re.compile(r"(^|[._])(roles|agents|workers|members)$", re.I)
+# folders of apps other people built on top of the project: community_usecase/, use_cases/, cookbook/
+SHOWCASE_DIR = re.compile(r"^(community[\w\- ]*|[\w\- ]*use[_\- ]?cases?|cookbooks?|contrib|showcases?|gallery)$", re.I)
 
 
 class _Collector:
@@ -883,33 +885,70 @@ def _drop_ports(c: _Collector) -> list[dict[str, Any]]:
     return out
 
 
+def paths_label(paths: list[str]) -> str:
+    """["a/x", "a/y"] -> "a/{x, y}"."""
+    parents = {str(_posix(p).parent) for p in paths}
+    if len(paths) > 1 and len(parents) == 1 and "." not in parents:
+        return f"{parents.pop()}/{{{', '.join(_posix(p).name for p in paths)}}}"
+    return ", ".join(paths)
+
+
+def _drop_showcases(c: _Collector) -> list[dict[str, Any]]:
+    """Apps people built on top of the project (community_usecase/stock-analysis, a cookbook) are not its agents -
+    unless they are all there is."""
+    def showcase(file: str) -> str | None:
+        parts = _posix(file).parts[:-1]
+        return next(("/".join(parts[:i + 1]) for i, p in enumerate(parts) if SHOWCASE_DIR.match(p)), None)
+
+    inside = {key: showcase(a["file"]) for key, a in c.agents.items()}
+    if not any(inside.values()) or all(inside.values()):
+        return []
+    dropped: dict[str, list[str]] = {}
+    for key, root in inside.items():
+        if root and all(showcase(f) for f, _ in c.sites.get(key, [])):
+            dropped.setdefault(root, []).append(c.agents.pop(key)["name"])
+    return [{"kind": "showcase", "paths": [root], "agents": names,
+             "note": "apps built on top of the project, not part of it"} for root, names in sorted(dropped.items())]
+
+
 def _drop_unselected_roles(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]]:
-    """Roles a configuration picks between are not parallel workers. When a default roles list names role
-    folders (session.roles = ["planner", "code_interpreter"]), an agent in a variant of one of them - a sibling
-    folder named after it, code_interpreter_cli_only next to code_interpreter - runs instead of it, not with it."""
+    """Roles a configuration picks are not all running at once. When a default roles list names role folders
+    (session.roles = ["planner", "code_interpreter"]), what it leaves out is off in a typical run: a variant of a
+    chosen role (code_interpreter_cli_only next to code_interpreter) runs instead of it, and an extra role - a
+    folder with its own role module beside other roles (ext_role/image_reader/image_reader.py) - only when a
+    config switches it on."""
     dirs: dict[str, set[str]] = {}  # folder name -> its paths
     for f in files:
         for d in _posix(f.rel).parents:
             if str(d) != ".":
                 dirs.setdefault(d.name.lower(), set()).add(str(d))
+    modules = {_posix(f.rel).parent for f in files if f.defines_agent and _posix(f.rel).parent.name == _posix(f.rel).stem}
     for rel, line, names in c.role_lists:
         chosen = {n.lower() for n in names}
         if sum(1 for n in chosen if n in dirs) < 2:
             continue
         role_dirs = {d for n in chosen for d in dirs.get(n, ())}
-        dropped: dict[str, list[str]] = {}
-        for key, a in list(c.agents.items()):
+        siblings = {str(_posix(d).parent) for d in role_dirs}
+        variants: set[str] = set()
+        for a in c.agents.values():
             folder = _posix(a["file"]).parent
-            fname = folder.name.lower()
-            if fname in chosen or not any(str(folder.parent / n) in role_dirs and fname.startswith(n + "_") for n in chosen):
-                continue
-            dropped.setdefault(str(folder), []).append(a["name"])
-            del c.agents[key]
-        if dropped:
-            return [{"kind": "config", "paths": sorted(dropped), "file": rel, "line": line, "default": names,
-                     "agents": [n for v in dropped.values() for n in v],
-                     "note": f"variants of the default roles {', '.join(names)} set at {rel}:{line}; "
-                             "configuration picks one of them"}]
+            if folder.name.lower() not in chosen and any(
+                    str(folder.parent / n) in role_dirs and folder.name.lower().startswith(n + "_") for n in chosen):
+                variants.add(str(folder))
+        extras = {str(m) for m in modules if m.name.lower() not in chosen and str(m) not in variants
+                  and not any(str(m).startswith(d + "/") for d in role_dirs)
+                  and (str(m.parent) in siblings or sum(1 for x in modules if x.parent == m.parent) > 1)}
+        if not variants and not extras:
+            continue
+        out = []
+        for group, what, note in ((variants, "variants of the default roles", "configuration picks one of them"),
+                                  (extras, "roles beyond the default", "a configuration has to switch them on")):
+            if group:
+                gone = [k for k, a in c.agents.items() if any(a["file"].startswith(g + "/") for g in group)]
+                out.append({"kind": "config", "paths": sorted(group), "file": rel, "line": line, "default": names,
+                            "agents": [c.agents.pop(k)["name"] for k in gone],
+                            "note": f"{what} {', '.join(names)} set at {rel}:{line}; {note}"})
+        return out
     return []
 
 
@@ -1025,12 +1064,12 @@ def scan(root: Path, files: list[SourceFile] | None = None,
     for e in c.edges:
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
-    left_out = _drop_ports(c) + _drop_unselected_roles(c, files)
+    left_out = _drop_showcases(c) + _drop_ports(c) + _drop_unselected_roles(c, files)
     if alternatives is not None:
         alternatives += left_out
     framework = _framework(c)
     names = [a["name"] for a in c.agents.values()]
-    not_drawn = "".join(f" Not drawn: {', '.join(alt['paths'])} ({alt['note']})." for alt in left_out)
+    not_drawn = "".join(f" Not drawn: {paths_label(alt['paths'])} ({alt['note']})." for alt in left_out)
     raw = {
         "project": root.name if root.is_dir() else root.stem,
         "framework": framework,
