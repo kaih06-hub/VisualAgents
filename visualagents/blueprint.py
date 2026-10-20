@@ -59,7 +59,8 @@ BLUEPRINT_JSON_SCHEMA: dict[str, Any] = {
         "project": {"type": "string"},
         "framework": {
             "type": "string",
-            "description": "langgraph, langchain, crewai, autogen, openai-agents, swarm, llamaindex, smolagents, custom, ...",
+            "description": "langgraph, langchain, crewai, autogen, camel, dspy, openai-agents, swarm, llamaindex, "
+                           "smolagents, custom, ...",
         },
         "summary": {"type": "string", "description": "2-4 sentences describing the overall workflow"},
         "agents": {"type": "array", "items": _AGENT_SCHEMA},

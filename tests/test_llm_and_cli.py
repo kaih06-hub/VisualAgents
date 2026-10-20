@@ -74,6 +74,85 @@ def test_scan_uses_structured_output_and_merges_static_aliases(monkeypatch, tmp_
     assert "Writer" in bp["agents"][1]["aliases"] or bp["agents"][1]["name"] == "Writer"
 
 
+def _agent(name, file="", line=0):
+    return {"id": bpm.slugify(name), "name": name, "role": "", "description": "", "tools": [], "file": file,
+            "line": line, "aliases": [], "keywords": []}
+
+
+def test_the_llm_map_leaves_out_an_alternative_implementation(monkeypatch, tmp_path):
+    (tmp_path / "multi_agents" / "agents").mkdir(parents=True)
+    (tmp_path / "multi_agents" / "agents" / "orchestrator.py").write_text(
+        "from langgraph.graph import StateGraph\n"
+        "g = StateGraph(dict)\n"
+        + "".join(f"g.add_node('{n}', {n})\n" for n in ("planner", "researcher", "writer", "reviewer"))
+        + "g.add_edge('planner', 'researcher')\n"
+    )
+    (tmp_path / "multi_agents" / "ag2").mkdir()
+    (tmp_path / "multi_agents" / "ag2" / "orchestrator.py").write_text(
+        "from autogen import ConversableAgent\n"
+        + "".join(f"{n.lower()} = ConversableAgent(name='{n}', system_message='x')\n"
+                  for n in ("ChiefEditor", "Researcher", "Writer", "Reviewer"))
+    )
+    lg = "multi_agents/agents/orchestrator.py"
+    payload = {
+        "project": "gptr", "framework": "langgraph", "summary": "A research team.",
+        "agents": [_agent("Planner", lg, 3), _agent("Researcher", lg, 4), _agent("Writer", lg, 5),
+                   _agent("Reviewer", "multi_agents/ag2/orchestrator.py", 5),  # also in the mapped team: kept
+                   _agent("ChiefEditor", "multi_agents/main.py", 9),  # named like the port's agent
+                   _agent("Coordinator", "multi_agents/ag2/orchestrator.py", 2)],  # defined in the port
+        "edges": [{"from": "planner", "to": "researcher", "label": "", "conditional": False},
+                  {"from": "chief_editor", "to": "coordinator", "label": "", "conditional": False}],
+        "entry": ["planner", "chief_editor"], "exits": ["writer"],
+        "steps": [{"order": 1, "title": "Plan", "agents": ["planner"], "description": ""},
+                  {"order": 2, "title": "Coordinate", "agents": ["chief_editor", "coordinator"], "description": ""}],
+    }
+    captured = {}
+    _fake_anthropic(monkeypatch, payload, captured)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    bp = scanner.scan_project(tmp_path, mode="llm", log=lambda m: None)
+
+    hints = captured["messages"][0]["content"].split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0]
+    assert json.loads(hints)["alternatives"][0]["paths"] == ["multi_agents/ag2"]
+    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "writer", "reviewer"]
+    assert bp["edges"] == [{"from": "planner", "to": "researcher", "label": "", "conditional": False}]
+    assert bp["entry"] == ["planner"]
+    assert [s["title"] for s in bp["steps"]] == ["Plan"]
+    assert "Not drawn: multi_agents/ag2" in bp["summary"]
+
+
+def test_every_independent_system_reaches_the_llm(monkeypatch, tmp_path):
+    """Two pipelines in one package (STORM and Co-STORM): both show up in the hints and in the source sent in full,
+    and the prompt asks for every system - not only the one with more code."""
+    (tmp_path / "wiki").mkdir()
+    (tmp_path / "wiki" / "curation.py").write_text(
+        "import dspy\n"
+        "class WikiWriter(dspy.Module):\n"
+        "    def __init__(self):\n"
+        "        self.ask = dspy.ChainOfThought('topic -> question')\n"
+        "class TopicExpert(dspy.Module):\n"
+        "    def __init__(self):\n"
+        "        self.answer = dspy.Predict('question -> answer')\n"
+        "w, e = WikiWriter(), TopicExpert()\n"
+    )
+    (tmp_path / "chat").mkdir()
+    for i in range(6):  # a bigger second system
+        (tmp_path / "chat" / f"agent_{i}.py").write_text(
+            "from interface import Agent\n" f"class Expert{i}(Agent):\n" "    def act(self):\n"
+            + "        self.turn += 1\n" * 40)
+    payload = {"project": "storm", "framework": "dspy", "summary": "s", "agents": [_agent("WikiWriter")],
+               "edges": [], "entry": [], "exits": [], "steps": []}
+    captured = {}
+    _fake_anthropic(monkeypatch, payload, captured)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    scanner.scan_project(tmp_path, mode="llm", max_chars=20_000, log=lambda m: None)
+
+    prompt = captured["messages"][0]["content"]
+    hints = json.loads(prompt.split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0])
+    assert {"WikiWriter", "TopicExpert", "Expert0", "Expert5"} <= {a["name"] for a in hints["agents"]}
+    assert '<file path="wiki/curation.py">' in prompt
+    assert "several independent systems" in captured["system"]
+
+
 def test_refusal_and_truncation_raise(monkeypatch):
     for reason in ("refusal", "max_tokens"):
         _fake_anthropic(monkeypatch, {}, {}, stop_reason=reason)

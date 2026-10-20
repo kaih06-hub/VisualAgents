@@ -308,6 +308,18 @@ client - never a class or helper shared by several agents, such as a common LLMS
 LLM decision picks the next agent. Include loops such as critic -> writer.
 - entry: the agents that receive the user's query first. exits: the agents that produce the final answer.
 - steps: the general blueprint a typical query moves through, as 2-8 ordered phases, each naming its agents.
+- framework: what the agents are built with, from the imports of the files that define them (langgraph, crewai, \
+autogen, camel, dspy, ...). A library used only for model calls (LangChain chat models, LiteLLM) is not the \
+framework when another one runs the agents; custom when none does. The hints' framework is a guess.
+- One repository can hold several independent systems: separate pipelines, each with its own runner, engine or \
+entry point (a package with a WikiRunner and another with a ChatRunner, say). Map every one of them, each with \
+its own agents, edges, entry and exits, even when one has far more code shown in full than the other; before \
+answering, check the outline for other *Runner / *Engine / *Pipeline classes and the agents they run. Give each \
+system its own steps, titled with the system's name.
+- Alternatives are not parallel workers. A port of the same agents to another framework, a legacy or v1 copy, \
+and roles that configuration picks between (a roles list, a mode flag, a registry lookup) replace each other \
+instead of running side by side: map the current or default one, and name the others only in the summary. \
+static_analysis_hints.alternatives lists the ones static analysis found - leave their agents out of the map.
 - file and line: where the agent is defined (use the line numbers shown in the source). line=0 if unsure.
 - The source starts with <repo_outline>: every source file with its classes (and their base classes), \
 functions and prompt personas, each with its line number - including files not shown in full. The files after it \
