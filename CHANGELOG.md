@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-10-19
 
 ### Fixed
 - The LLM scan no longer reads files git ignores (local config with credentials, data, your own documents), skips

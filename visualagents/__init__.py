@@ -1,6 +1,6 @@
 """VisualAgents - a live map of which agent in a multi-agent AI system is doing what."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .sdk import (  # noqa: E402,F401
     agent,

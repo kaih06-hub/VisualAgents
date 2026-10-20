@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "visualagents"
-version = "0.1.0"
+version = "0.1.1"
 description = "A live map of which agent in a multi-agent AI system is doing what - from its chain of thought."
 readme = "README.md"
 license = "MIT"
