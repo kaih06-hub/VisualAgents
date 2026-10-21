@@ -117,10 +117,11 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         mods, names = _imports(tree)
         clients = _client_vars(tree, mods, names)
         chains = LLM_CHAINS + (LLM_CHAINS_IF_IMPORTED if _imports_llm(mods, names) else ())
+        templates = _prompt_globals(tree)
         for fn in _functions(tree, f.rel):
             fns.append(fn)
             fn.via = _llm_call(fn.node, mods, names, clients, chains, in_class=fn.cls is not None)
-            fn.own_prompt = _has_own_prompt(fn.node)
+            fn.own_prompt = _has_own_prompt(fn.node, templates)
             fn.tools = _tool_names(fn.node)
             if fn.via:
                 direct.append(fn)
@@ -133,7 +134,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     used_files = {fn.rel for fn in direct if fn.key not in dead}
     direct = [fn for fn in direct if fn.key not in dead or fn.rel not in used_files]
     if not direct:
-        return {"agents": [], "edges": []}
+        return {"agents": [], "edges": [], "pipelines": {}}
 
     callers: dict[str, list[_Fn]] = {}
     picked_names = {name for fn in fns for name in fn.picks}
@@ -184,8 +185,12 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         ups = [c for c in callers_of(fn) if c.key not in trail] if not chose else []  # it chose the prompt: a step
         tools = tools + tuple(t for t in fn.tools if t not in tools)
         picked = bool(ups) and _picks_prompt(fn, ups)
+        # front ends: two or more entry points nothing else calls that pass the user's words through (cli(),
+        # server(), bot()) make what they call the system - a test driver writing sample prompts aside
+        fronts = not picked and sum(1 for u in ups if not u.own_prompt and u.name != "<module>" and
+                                    all(x.name == "<module>" for x in callers_of(u))) >= 2
         # a helper that only forwards someone else's prompt is plumbing: its callers are the agents
-        if ups and depth < 3 and ((not fn.own_prompt and not _AGENT_WORD.search(fn.name)) or picked):
+        if ups and depth < 3 and not fronts and ((not fn.own_prompt and not _AGENT_WORD.search(fn.name)) or picked):
             if fn.cls and any((c.rel, c.cls) != (fn.rel, fn.cls) for c in ups):
                 services.add((fn.rel, fn.cls))
             # the runtime sees the wrapper (LLMService.stream_chat) when its caller runs it in another task
@@ -210,12 +215,31 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     # a class named or built like an agent (SolverAgent(BaseAgent)) is one agent, whichever of its methods reach the
     # model and however much other code calls them; only a shared client class (LLMService) splits into its methods
     agent_classes = agent_class_names(files)
+    pipelines = _class_pipelines(list(sites.values()), fns)
     agents: dict[str, dict[str, Any]] = {}  # agent id -> agent
     meta: dict[str, dict[str, Any]] = {}  # agent id -> how it was found: its file, its functions, named after
     owner: dict[str, str] = {}  # function name -> agent id
     role_edges: list[tuple[str, str]] = []
     for fn in sorted(sites.values(), key=lambda s: (s.rel, s.line)):
         stem = _stem(fn.rel)
+        pipe = pipelines.get((fn.rel, fn.cls or ""))
+        if pipe:  # a step of a class's own pipeline (a method of it that writes no prompt joins its first step)
+            step = next((s for s in pipe if s.name == fn.name), pipe[0])
+            name = step.name.lstrip("_")
+            aid, aliases = f"{fn.rel}:{fn.cls}.{step.name}", [name, step.name, f"{fn.cls}.{step.name}"]
+            aliases += _prompt_names(step.node) + ([fn.cls] if step is pipe[0] else [])
+            agent = agents.get(aid)
+            if agent is None:
+                if len(agents) >= MAX_AGENTS:
+                    continue
+                agent = agents[aid] = {"name": name, "role": f"a step of {fn.cls} ({fn.via})", "tools": [],
+                                       "description": step.doc, "file": fn.rel, "line": step.line, "aliases": []}
+                meta[aid] = {"rel": fn.rel, "fns": set(), "named": "step"}
+            meta[aid]["fns"].add(fn.name)
+            agent["aliases"] += [a for a in aliases if a not in agent["aliases"]]
+            agent["tools"] += [t for t in fn.tools if t not in agent["tools"]]
+            owner.setdefault(fn.name, aid)
+            continue
         if fn.cls and ((fn.rel, fn.cls) not in services or fn.cls in agent_classes):
             aid, name, aliases, named = f"{fn.rel}:{fn.cls}", fn.cls, [fn.cls, fn.name], "class"
         elif fn.name == "<module>":
@@ -297,7 +321,97 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             order = list(dict.fromkeys(called))
             for a, b in zip(order, order[1:]):
                 link(a, b, "then", pipeline=True)  # in call order: a static pass that follows branches may redo it
-    return {"agents": list(agents.values()), "edges": edges}
+
+    by_cls: dict[tuple[str, str], dict[str, _Fn]] = {}
+    for fn in fns:
+        if fn.cls:
+            by_cls.setdefault((fn.rel, fn.cls), {})[fn.name] = fn
+
+    def agents_run_by(fn: _Fn, node: ast.AST | None = None, depth: int = 0) -> list[str]:
+        """The agents a piece of code runs, in order - through its class's own methods that run agents themselves."""
+        out: list[str] = []
+        for call in _calls_in_run_order(node or fn.node):
+            name = _dotted(call.func).replace("()", "").split(".")[-1]
+            target = merged.get(owner.get(name, ""), owner.get(name))
+            if target in agents:
+                ids = [target]
+            else:
+                g = by_cls.get((fn.rel, fn.cls or ""), {}).get(name)
+                ids = agents_run_by(g, None, depth + 1) if g is not None and g.key not in sites and depth < 2 else []
+            out += [i for i in ids if i not in out]
+        return out
+
+    # a loop that runs several agents (while not done / for each round) comes back to its first one
+    for fn in fns:
+        if fn.key in sites and fn.name != "<module>":
+            continue
+        for loop in _agent_loops(fn.node):
+            order = agents_run_by(fn, loop)
+            if len(order) >= 2:
+                link(order[-1], order[0], "loop")
+    # a pipeline step that first has its class run the earlier steps (query() calling self.retrieve()) comes after them
+    for (rel, cls), pipe in pipelines.items():
+        for step in pipe:
+            mine = owner.get(step.name)
+            for n, _ in sorted(step.calls, key=lambda c: c[1]):
+                g = by_cls.get((rel, cls), {}).get(n)
+                if mine and g is not None and g.key not in sites:
+                    order = agents_run_by(g)
+                    if order and order[-1] != mine:
+                        link(order[-1], mine, "then")
+    steps = {cls: [agents[owner[f.name]]["name"] for f in pipe if owner.get(f.name) in agents]
+             for (_, cls), pipe in pipelines.items()}
+    return {"agents": list(agents.values()), "edges": edges, "pipelines": steps}
+
+
+def _calls_in_run_order(node: ast.AST):
+    """Calls in the order they run: statement by statement, a call's arguments before the call itself (nested
+    classes left out, as in _own_calls)."""
+    for child in ast.iter_child_nodes(node):
+        if not isinstance(child, ast.ClassDef):
+            yield from _calls_in_run_order(child)
+    if isinstance(node, ast.Call):
+        yield node
+
+
+def _agent_loops(node: ast.AST) -> list[ast.AST]:
+    """Loops that repeat a round of work: `while ...` and `for _ in range(n)` (not a loop over a list of items)."""
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.While) or (isinstance(n, (ast.For, ast.AsyncFor)) and isinstance(n.iter, ast.Call)
+                                         and _dotted(n.iter.func) == "range"):
+            out.append(n)
+    return out
+
+
+def _prompt_names(node: ast.AST) -> list[str]:
+    """The prompt constants a function uses: SUB_QUERY_PROMPT, prompts.REFLECT."""
+    out = []
+    for n in ast.walk(node):
+        name = n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else ""
+        if name.isupper() and _PROMPT_NAME.search(name) and name not in out:
+            out.append(name)
+    return out
+
+
+def _class_pipelines(sites: list[_Fn], fns: list[_Fn]) -> dict[tuple[str, str], list[_Fn]]:
+    """A class that runs three or more of its own differently prompted methods one after another (sub-queries, then
+    search, then reflection, then a summary) is a pipeline: each prompted method is a step of its own on the map. A
+    class whose methods share one prompt, or that nothing in it runs in sequence, stays one agent."""
+    by_cls: dict[tuple[str, str], list[_Fn]] = {}
+    for fn in sites:
+        if fn.cls and fn.own_prompt and not fn.name.startswith("__"):
+            by_cls.setdefault((fn.rel, fn.cls), []).append(fn)
+    out = {}
+    for key, steps in by_cls.items():
+        prompts = {tuple(_prompt_names(fn.node)) or fn.name for fn in steps}
+        if len(steps) < 3 or len(prompts) < 3:
+            continue
+        names = {fn.name for fn in steps}
+        runner = any((f.rel, f.cls) == key and len(names & {n for n, _ in f.calls} - {f.name}) >= 2 for f in fns)
+        if runner:
+            out[key] = sorted(steps, key=lambda f: f.line)
+    return out
 
 
 def _unused(fn: _Fn, referenced: set[str]) -> bool:
@@ -569,6 +683,7 @@ def _client_vars(tree: ast.AST, mods, names) -> dict[str, str]:
 
 def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=False) -> str:
     """How this function calls a model ("" when it doesn't): the call as written, e.g. "mlx_lm.generate"."""
+    weak = ""  # a client built or used without a generation call: an embedding model is not an agent
     for call in _own_calls(node):
         d = _dotted(call.func).replace("()", "").replace("[]", "")
         parts = d.split(".")
@@ -581,12 +696,58 @@ def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=F
         if len(parts) == 1 and root in names and _is_llm_module(names[root][0]) and names[root][1] in LLM_ENTRY:
             return f"{names[root][0]}.{names[root][1]}"  # from mlx_lm import generate; generate(...)
         if in_class and last in CLIENT_CLASSES and len(parts) <= 2:
-            return last  # a class that builds its own client / chat model is an LLM-backed component
+            weak = weak or last  # a class that builds its own client / chat model is an LLM-backed component
+            continue
         var = parts[1] if root == "self" and len(parts) > 1 else root
         origin = clients.get(var)
         if origin and ((len(parts) == (2 if root == "self" else 1) and origin in ("pipeline", "Llama", "LLM"))
                        or (len(parts) > 1 and last in LLM_USE)):
-            return f"{origin}.{last}" if last != var else origin
+            weak = weak or (f"{origin}.{last}" if last != var else origin)
+    if weak and not _embeds(node):
+        return weak
+    return "" if weak else _http_llm_call(node)
+
+
+_EMBED_CALLS = re.compile(r"(^|\.)(embeddings?\.create|Embedding\.create|embed|embed_content|embed_documents|embed_query|"
+                          r"aembed_documents|aembed_query|create_embedding)$")
+
+
+def _embeds(node: ast.AST) -> bool:
+    """Does this code build or call an embedding model (Llama(..., embedding=True), embeddings.create, .embed)?"""
+    if "embed" in getattr(node, "name", "").lower():
+        return True
+    for call in _own_calls(node):
+        if _EMBED_CALLS.search(_dotted(call.func).replace("()", "")):
+            return True
+        if any(k.arg in ("embedding", "embeddings") and isinstance(k.value, ast.Constant) and k.value.value is True
+               for k in call.keywords):
+            return True
+    return False
+
+
+# a raw HTTP request to a model: the endpoint, the reply's shape or the request's body says so
+_LLM_URL = re.compile(r"/chat/completions|/v1/completions|/v1/messages\b|:(stream)?generateContent|/api/(chat|generate)\b|"
+                      r"api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|openrouter\.ai/api|"
+                      r"api\.groq\.com|api\.deepseek\.com|api\.mistral\.ai|api\.together\.xyz|api-inference\.huggingface\.co|"
+                      r"router\.huggingface\.co|dashscope\.aliyuncs\.com", re.I)
+_LLM_REPLY_KEYS = {"choices", "candidates", "generated_text"}
+_HTTP_SEND = re.compile(r"(^|\.)(post|apost|urlopen)$|^(requests|httpx)\.request$")
+
+
+def _http_llm_call(node: ast.AST) -> str:
+    body = [st for st in getattr(node, "body", []) if not isinstance(st, ast.ClassDef)]
+    inner = [n for st in body for n in ast.walk(st)]  # decorators (@app.post("/v1/chat/completions")) excluded
+    if not any(isinstance(n, ast.Call) and _HTTP_SEND.search(_dotted(n.func).replace("()", "")) for n in inner):
+        return ""
+    for n in inner:
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and _LLM_URL.search(n.value):
+            return "HTTP POST (model endpoint)"
+        if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value in _LLM_REPLY_KEYS:
+            return "HTTP POST (model reply)"
+        if isinstance(n, ast.Dict):
+            keys = {k.value for k in n.keys if isinstance(k, ast.Constant)}
+            if "model" in keys and keys & {"messages", "prompt", "contents"}:
+                return "HTTP POST (model request)"
     return ""
 
 
@@ -617,7 +778,16 @@ def _not_prompt_text(node: ast.AST) -> set[int]:
     return skip
 
 
-def _has_own_prompt(node: ast.AST) -> bool:
+def _prompt_globals(tree: ast.AST) -> set[str]:
+    """Module-level names that hold prompt text: parse_task_prompt = config["prompt"]["parse_task"]."""
+    out = set()
+    for st in getattr(tree, "body", []):
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target] if isinstance(st, ast.AnnAssign) else []
+        out |= {t.id for t in targets if isinstance(t, ast.Name) and _PROMPT_NAME.search(t.id)}
+    return out
+
+
+def _has_own_prompt(node: ast.AST, templates: set[str] = frozenset()) -> bool:
     """Does the function write its own prompt (text, f-strings, a *_PROMPT constant) or only pass one through?"""
     skip = _not_prompt_text(node)
     if _receives_prompt(node):
@@ -630,8 +800,8 @@ def _has_own_prompt(node: ast.AST) -> bool:
             continue
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and " " in n.value:
             chars += len(n.value)
-        elif isinstance(n, ast.Name) and _PROMPT_NAME.search(n.id) and n.id.isupper():
-            return True
+        elif isinstance(n, ast.Name) and _PROMPT_NAME.search(n.id) and (n.id.isupper() or n.id in templates):
+            return True  # SYSTEM_PROMPT, or a module-level template it fills in (parse_task_prompt)
         elif isinstance(n, ast.Attribute) and _PROMPT_NAME.search(n.attr) and n.attr.isupper():
             return True
         elif isinstance(n, ast.keyword) and n.arg in ("system", "system_prompt", "instructions") and \
@@ -769,17 +939,25 @@ def _self_calls(node: ast.AST) -> set[str]:
     return on_self - other
 
 
+_RUNS_GIVEN = {"Thread", "Process", "submit", "map", "starmap", "imap", "apply_async", "run_in_executor", "to_thread"}
+
+
 def _calls_and_picks(node: ast.AST) -> tuple[list[tuple[str, int]], dict[str, set[str]]]:
     """Every call's simple name - a callable handed to functools.partial counts as called - and, per callee, the
     prompt names passed to it as string literals."""
     calls: list[tuple[str, int]] = []
     picks: dict[str, set[str]] = {}
-    for c in _own_calls(node):
+    for c in _calls_in_run_order(node):
         name = _dotted(c.func).replace("()", "").split(".")[-1]
         target, args = name, c
         if name == "partial" and c.args:  # functools.partial(self._run, prompt="...") is a call to come
             target = _dotted(c.args[0]).replace("()", "").split(".")[-1]
             calls.append((target, c.lineno))
+        elif name in _RUNS_GIVEN:  # Thread(target=run_task), pool.submit(run_task, ...), executor.map(run_task, ...)
+            given = [k.value for k in c.keywords if k.arg in ("target", "fn", "func")] or c.args[:1]
+            for g in given:
+                if isinstance(g, (ast.Name, ast.Attribute)):
+                    calls.append((_dotted(g).split(".")[-1], c.lineno))
         calls.append((name, c.lineno))
         for k in args.keywords:
             if k.arg and _PICK_PARAMS.match(k.arg):  # prompt="reflect", or prompt=choose_prompt()

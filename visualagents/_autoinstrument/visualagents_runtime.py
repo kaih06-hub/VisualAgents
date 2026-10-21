@@ -589,7 +589,9 @@ def _caller_stack():
     names = []
     while frame is not None:
         filename = frame.f_code.co_filename or ""
-        if any(m in filename for m in _FRAMEWORK_MARKERS) and _is_library(filename):
+        # this runtime's own frames are never a framework, wherever VisualAgents is installed (~/agents/... included)
+        if any(m in filename for m in _FRAMEWORK_MARKERS) and _is_library(filename) and \
+                os.path.dirname(os.path.abspath(filename)) != _HERE:
             return False
         if not _is_library(filename):
             code = frame.f_code.co_name

@@ -25,6 +25,23 @@
   - steps that each pick the prompt of one shared model call (`partial(self._ask, prompt="reflect")`) are agents,
     and `self._ask()` in a class with no base is that class's own method;
   - a step written once per mode (`one_chunk_reflect` / `multichunk_reflect`) is one step, unless one feeds the other.
+- Six gaps found by a third check of ten more projects against their README graphs (no rule names a project):
+  - a model called over raw HTTP (`requests.post` to a model endpoint, or reading `["choices"]` from the reply) is a
+    model call; code that only builds or calls an embedding model is not an agent;
+  - an agent class that runs three or more of its own differently prompted methods in sequence is drawn as those
+    steps, with the order its own methods run them in;
+  - graphs built from a node table (`add_node(key, self.node_functions[key])`) or from edge dicts
+    (`add_edge(e["from"], e["to"])`); a node is never named after the variable holding its name, and
+    `refiner_agent` / `RefinerAgent` beside the node `refiner` is that node;
+  - a group chat whose manager picks the speaker is drawn in the listed order, not as a ring, and without the person
+    in it (round-robin chats still go round);
+  - routers that return computed node names (`f"speech_{p}"`, `[Send("search", s) ...]`) and path maps written as
+    dict comprehensions; an agent handed to one node's factory (`make_node("search", web_scraper, ...)`) is that node;
+  - a folder with its own README that the rest of the project never imports is a separate program and stays off the
+    map; a loop that runs several agents (`while`, `for _ in range(n)`) comes back to its first one; front ends
+    (a CLI, a server, a bot) calling one core make that core the agent; module-level prompt templates count.
+- Live tracking works when VisualAgents is installed under a folder named `agents/` (its own frames looked like the
+  OpenAI Agents SDK, so every model call was skipped).
 - Left off the map: an older implementation kept in `legacy/` / `deprecated/` / `old/` beside the current one; usage
   examples under `examples/` when the project wires agents of its own; the project's own `create_agent()` that
   compiles its graph; pyvis graphs; and a LangChain text splitter no longer makes a project "langchain".

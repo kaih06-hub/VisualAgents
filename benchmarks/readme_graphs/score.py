@@ -196,7 +196,8 @@ def score(repo, bp, gt=None):
 def sets():
     sys.path.insert(0, str(Path(__file__).parent))
     from ground_truth_set2 import GT2
-    return {"set1": GT, "set2": GT2}
+    from ground_truth_set3 import GT3
+    return {"set1": GT, "set2": GT2, "set3": GT3}
 
 
 if __name__ == "__main__":

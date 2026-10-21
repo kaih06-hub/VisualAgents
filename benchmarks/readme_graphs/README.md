@@ -20,3 +20,6 @@ Results of the first run (2026-10-21, static mode) are in `results-2026-10-21.js
 
 A second held-out set of ten more projects lives in `ground_truth_set2.py`; `run_set2.sh` clones and scores it
 (`score.py <out> set2`). Results before/after the fixes it led to are in `results-set2-2026-10-21.json`.
+
+A third set of ten (`ground_truth_set3.py`, `run_set3.sh`, `score.py <out> set3`) had its ground truth written from
+the READMEs before any scan. Sets 1-3 before/after the fixes it led to are in `results-sets123-2026-10-21.json`.
