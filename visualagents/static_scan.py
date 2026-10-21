@@ -93,7 +93,7 @@ class _Collector:
         self.agent_classes: set[str] = set()  # names of the classes found to be agents or agent programs
         self.test_files: set[str] = set()  # the project's tests: they restate agents with stubs and fixtures
         self.node_keys: dict[str, set[str]] = {}  # graph node -> names its action is built from ("coder_agent")
-        self.builder_ends: dict[str, tuple[list[str], list[str]]] = {}  # graph builder -> (entry nodes, exit nodes)
+        self.builder_ends: dict[str, tuple[list[str], list[str]]] = {}  # "file:builder" -> (entry nodes, exit nodes)
         self.compiled: dict[str, str] = {}  # variable -> the graph builder it holds compiled: sub = builder.compile()
         self.subgraphs: list[tuple[str, str]] = []  # (node, builder) for a node that runs a whole compiled graph
         self.on_their_own: set[str] = set()  # model callers with no known caller: each its own start and end
@@ -322,7 +322,7 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
             if langgraph and _call_name(node.value) == "compile" and isinstance(node.value.func, ast.Attribute):
                 for t in _assigned_names(node):
-                    c.compiled[t] = _ref(node.value.func.value) or ""
+                    c.compiled[t] = f"{src.rel}:{_ref(node.value.func.value) or ''}"
             cls_name = _call_name(node.value)
             if cls_name and cls_name[:1].isupper():
                 for t in node.targets:
@@ -370,7 +370,7 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
         targets = _assigned_names(parent) if parent is not None else []
         if langgraph and name in ("add_edge", "set_entry_point", "set_finish_point") and \
                 isinstance(node.func, ast.Attribute) and node.args:
-            ends = c.builder_ends.setdefault(_ref(node.func.value) or "", ([], []))
+            ends = c.builder_ends.setdefault(f"{src.rel}:{_ref(node.func.value) or ''}", ([], []))
             first, last = _ref(node.args[0]), _ref(node.args[-1])
             if name == "set_entry_point" or (name == "add_edge" and first in START_NAMES):
                 ends[0].append(last or "")
@@ -401,7 +401,7 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                     v for v in (_lit(n) for n in ast.walk(second) if isinstance(n, ast.Constant)) if v and v.isidentifier())
             sub = None  # add_node("write", writing_graph.compile()) / add_node("write", compiled_writer)
             if isinstance(second, ast.Call) and isinstance(second.func, ast.Attribute) and second.func.attr == "compile":
-                sub = _ref(second.func.value)
+                sub = f"{src.rel}:{_ref(second.func.value) or ''}"
             elif isinstance(second, ast.Name):
                 sub = c.compiled.get(second.id)
             if sub:
