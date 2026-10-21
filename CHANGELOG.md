@@ -12,6 +12,26 @@
   - an app with no mapped agents shows each caller as its own agent instead of nothing.
   - hook mode now wakes for CrewAI, AutoGen and other frameworks that print their own agents.
 
+- Static analysis follows the run order of agent objects, found missing in a second held-out check of ten more
+  projects against their README graphs (no rule names a project):
+  - a manager that runs SDK agents through its own helpers (`await self._plan()`, then a search per item, then the
+    writer) links them in the order they run; `if` / `match` branches are alternatives, a `try` handler is the
+    failure path, and `return` / `raise` / `break` / `continue` end a path; arguments run before the call they feed;
+  - an agent given to another as a tool through a variable (`t = risk.as_tool(...)`, `writer.clone(tools=[t])`);
+  - AG2 chats with agents kept in a dict or built by factories (`agents["user"].initiate_chat(agents["planner"])`,
+    `return Planner(cfg).agent`) and nested chats registered on an agent;
+  - named instances of a project subclass of a framework agent (`MyProxy(name="user")`, `MyProxy(name="executor")`);
+  - a LangGraph node whose function invokes a compiled graph of its own file (`await researcher.ainvoke(...)`);
+  - steps that each pick the prompt of one shared model call (`partial(self._ask, prompt="reflect")`) are agents,
+    and `self._ask()` in a class with no base is that class's own method;
+  - a step written once per mode (`one_chunk_reflect` / `multichunk_reflect`) is one step, unless one feeds the other.
+- Left off the map: an older implementation kept in `legacy/` / `deprecated/` / `old/` beside the current one; usage
+  examples under `examples/` when the project wires agents of its own; the project's own `create_agent()` that
+  compiles its graph; pyvis graphs; and a LangChain text splitter no longer makes a project "langchain".
+- `benchmarks/readme_graphs`: a second set of ten projects (`ground_truth_set2.py`, `run_set2.sh`, results in
+  `results-set2-2026-10-21.json`) and a `node_recall_code` score that leaves out components the README drawing has
+  and today's code no longer does.
+
 - Static analysis maps more shapes of agent system, found missing in a held-out check of ten projects against the
   graphs in their READMEs (no rule names a project):
   - several named instances of one model-calling class (`Player(name="Proposer")`, `[Player(name=n) for n in SIDES]`)

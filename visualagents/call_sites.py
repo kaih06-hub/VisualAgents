@@ -87,6 +87,8 @@ class _Fn:
     tools: list[str] = field(default_factory=list)  # tool schemas it defines and hands to the model
     wrapped: list[str] = field(default_factory=list)  # wrapper methods it reaches the model through
     cls_bases: int = 0  # how many base classes its class names (an override may be called by a framework)
+    picks: dict[str, set[str]] = field(default_factory=dict)  # callee -> prompt names it passes (prompt="reflect")
+    self_calls: set[str] = field(default_factory=set)  # names it calls only as self.x() / cls.x()
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -134,6 +136,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         return {"agents": [], "edges": []}
 
     callers: dict[str, list[_Fn]] = {}
+    picked_names = {name for fn in fns for name in fn.picks}
     for fn in fns:
         for name, _ in fn.calls:
             callers.setdefault(name, []).append(fn)
@@ -153,6 +156,9 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         for c in callers.get(fn.name, []):
             if c.key == fn.key or c.key in seen or not reaches(c, fn):
                 continue
+            # self._run() in a method of a class with no base is that class's own _run, not another class's
+            if c.cls and fn.cls and c.cls != fn.cls and not c.cls_bases and fn.name in c.self_calls:
+                continue
             # `if __name__ == "__main__": main()` does not make main plumbing - but a script whose top-level code
             # writes the prompts and sends each through its own api_call() helper is the agent
             if c.name == "<module>" and not (c.rel == fn.rel and c.own_prompt):
@@ -161,20 +167,31 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             out.append(c)
         return out
 
+    # callers that each pick the prompt a shared model call renders are steps of their own: climbing stops there
+    choosers: set[tuple[str, str, str]] = set()
+    for fn in fns:
+        if fn.name in picked_names:
+            ups = callers_of(fn)
+            if _picks_prompt(fn, ups):
+                choosers |= {c.key for c in ups if c.picks.get(fn.name)}
+
     sites: dict[tuple[str, str, str], _Fn] = {}
     services: set[tuple[str, str]] = set()  # LLM wrapper classes used from elsewhere (LLMService, ModelClient)
 
-    def climb(fn: _Fn, via: str, depth: int, trail: frozenset, tools: tuple[str, ...], wrapped: tuple[str, ...]):
-        ups = [c for c in callers_of(fn) if c.key not in trail]
+    def climb(fn: _Fn, via: str, depth: int, trail: frozenset, tools: tuple[str, ...], wrapped: tuple[str, ...],
+              chose: bool = False):
+        chose = chose or fn.key in choosers
+        ups = [c for c in callers_of(fn) if c.key not in trail] if not chose else []  # it chose the prompt: a step
         tools = tools + tuple(t for t in fn.tools if t not in tools)
+        picked = bool(ups) and _picks_prompt(fn, ups)
         # a helper that only forwards someone else's prompt is plumbing: its callers are the agents
-        if ups and not fn.own_prompt and depth < 3 and not _AGENT_WORD.search(fn.name):
+        if ups and depth < 3 and ((not fn.own_prompt and not _AGENT_WORD.search(fn.name)) or picked):
             if fn.cls and any((c.rel, c.cls) != (fn.rel, fn.cls) for c in ups):
                 services.add((fn.rel, fn.cls))
             # the runtime sees the wrapper (LLMService.stream_chat) when its caller runs it in another task
             wrapped = wrapped + ((f"{fn.cls}.{fn.name}",) if fn.cls else ())
             for c in ups:
-                climb(c, fn.name, depth + 1, trail | {fn.key}, tools, wrapped)
+                climb(c, fn.name, depth + 1, trail | {fn.key}, tools, wrapped, picked and bool(c.picks.get(fn.name)))
             return
         if fn.key not in sites:
             fn.via = fn.via if depth == 0 else via
@@ -245,6 +262,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             owner.setdefault(f"<module>:{fn.rel}", aid)
 
     merged = _merge_variants(agents, meta)  # programmer_humaneval.py + programmer_mbpp.py: one programmer
+    merged.update(_merge_step_variants(agents, meta, fns))  # one_chunk_reflect() + multichunk_reflect(): one step
     _name_after_files(agents, meta)  # api_call() in three scripts: three agents named after their scripts
     for k, v in list(owner.items()):
         owner[k] = merged.get(v, v)
@@ -252,11 +270,12 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     edges: list[dict[str, Any]] = []
     seen_edges: set[tuple[str, str]] = set()
 
-    def link(a: str, b: str, label: str) -> None:
+    def link(a: str, b: str, label: str, pipeline: bool = False) -> None:
         a, b = merged.get(a, a), merged.get(b, b)
         if a != b and a in agents and b in agents and (a, b) not in seen_edges and len(edges) < 20:
             seen_edges.add((a, b))
-            edges.append({"from": agents[a]["name"], "to": agents[b]["name"], "label": label, "conditional": False})
+            edges.append({"from": agents[a]["name"], "to": agents[b]["name"], "label": label, "conditional": False,
+                          **({"_pipeline": True} if pipeline else {})})
 
     for a, b in role_edges:
         link(a, b, "then")
@@ -277,7 +296,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         elif len(set(called)) >= 2:  # a pipeline / orchestrator running agents one after another
             order = list(dict.fromkeys(called))
             for a, b in zip(order, order[1:]):
-                link(a, b, "then")
+                link(a, b, "then", pipeline=True)  # in call order: a static pass that follows branches may redo it
     return {"agents": list(agents.values()), "edges": edges}
 
 
@@ -392,6 +411,78 @@ def _merge_variants(agents: dict[str, dict[str, Any]], meta: dict[str, dict[str,
             merged[other] = ids[0]
         if _stem(meta[ids[0]]["rel"]) not in keep["aliases"]:
             keep["aliases"].append(_stem(meta[ids[0]]["rel"]))
+    return merged
+
+
+def _feeds(fns: list[_Fn]) -> set[tuple[str, str]]:
+    """(producer, consumer) pairs of functions where the result of one call is passed to another: b(a(x)), or
+    y = a(x) and later b(y)."""
+    out: set[tuple[str, str]] = set()
+
+    def name(call: ast.Call) -> str:
+        return _dotted(call.func).replace("()", "").split(".")[-1]
+
+    for f in fns:
+        made: dict[str, set[str]] = {}  # variable -> the calls whose result it holds
+        for node in sorted((n for n in ast.walk(f.node) if isinstance(n, (ast.Assign, ast.Call))),
+                           key=lambda n: (n.lineno, n.col_offset)):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        made[t.id] = {name(c) for c in ast.walk(node.value) if isinstance(c, ast.Call)}
+            elif isinstance(node, ast.Call):
+                me = name(node)
+                for arg in [*node.args, *(k.value for k in node.keywords)]:
+                    for sub in ast.walk(arg):
+                        if isinstance(sub, ast.Call):
+                            out.add((name(sub), me))
+                        elif isinstance(sub, ast.Name):
+                            out |= {(p, me) for p in made.get(sub.id, ())}
+    return out
+
+
+def _merge_step_variants(agents: dict[str, dict[str, Any]], meta: dict[str, dict[str, Any]],
+                         fns: list[_Fn]) -> dict[str, str]:
+    """Steps written twice for two modes in one file (one_chunk_translate / one_chunk_reflect next to
+    multichunk_translate / multichunk_reflect): the same step, in a variant. Two name prefixes that pair up on two or
+    more steps are variants - unless one's output is fed to the other (review_code(generate_code(x)): two roles on one
+    thing, not one step twice). Each pair is merged into one agent named after the step. Returns merged id -> kept id."""
+    feeds = _feeds(fns)
+    by_step: dict[tuple[str, str], dict[str, str]] = {}  # (file, step) -> prefix -> agent id
+    for aid, m in meta.items():
+        if m["named"] != "function" or aid not in agents:
+            continue
+        tokens = agents[aid]["name"].lstrip("_").split("_")
+        for k in (1, 2):
+            step = "_".join(tokens[k:])
+            if len(tokens) > k + 1 or len(step) >= 8:
+                by_step.setdefault((m["rel"], step), {})["_".join(tokens[:k])] = aid
+    pairs: dict[tuple[str, str, str], list[tuple[str, str]]] = {}  # (file, prefix a, prefix b) -> steps
+    for (rel, step), pre in by_step.items():
+        names = sorted(pre)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                if pre[a] != pre[b]:
+                    pairs.setdefault((rel, a, b), []).append((step, pre[a]))
+    merged: dict[str, str] = {}
+    for (rel, a, b), steps in pairs.items():
+        if len(steps) < 2:
+            continue
+        both = [(agents[keep_id]["name"], agents[by_step[(rel, step)][b]]["name"]) for step, keep_id in steps
+                if keep_id in agents and by_step[(rel, step)][b] in agents]
+        if any((x, y) in feeds or (y, x) in feeds for x, y in both):
+            continue
+        for step, keep_id in steps:
+            other_id = by_step[(rel, step)][b]
+            keep_id = merged.get(keep_id, keep_id)
+            if other_id in merged or other_id not in agents or keep_id not in agents or other_id == keep_id:
+                continue
+            keep, other = agents[keep_id], agents.pop(other_id)
+            keep["aliases"] += [x for x in other["aliases"] if x not in keep["aliases"]]
+            keep["tools"] += [t for t in other["tools"] if t not in keep["tools"]]
+            keep["name"] = step
+            keep["aliases"] = [step, *[x for x in keep["aliases"] if x != step]]
+            merged[other_id] = keep_id
     return merged
 
 
@@ -634,7 +725,8 @@ def _functions(tree: ast.Module, rel: str) -> list[_Fn]:
         fn = _Fn(rel, cls, node.name, node.lineno, first_line(node), node)
         fn.cls_doc = first_line(cls_node) if cls_node is not None else ""
         fn.cls_bases = len(cls_node.bases) if cls_node is not None else 0
-        fn.calls = [(_dotted(c.func).replace("()", "").split(".")[-1], c.lineno) for c in _own_calls(node)]
+        fn.calls, fn.picks = _calls_and_picks(node)
+        fn.self_calls = _self_calls(node)
         out.append(fn)
 
     top = ast.Module(body=[], type_ignores=[])
@@ -649,9 +741,63 @@ def _functions(tree: ast.Module, rel: str) -> list[_Fn]:
             top.body.append(node)
     if top.body:
         fn = _Fn(rel, None, "<module>", top.body[0].lineno, "", top)
-        fn.calls = [(_dotted(c.func).replace("()", "").split(".")[-1], c.lineno) for c in _own_calls(top)]
+        fn.calls, fn.picks = _calls_and_picks(top)
         out.append(fn)
     return out
+
+
+# a parameter that says which prompt / template the call renders: _run(problem, prompt="code_prompt_reflect")
+_PICK_PARAMS = re.compile(r"^(prompt|prompt_name|prompt_key|prompt_id|prompt_type|template|template_name|"
+                          r"template_key|prompt_template)$")
+
+
+def _self_calls(node: ast.AST) -> set[str]:
+    """Names this function calls only on self / cls (partial(self._run) included)."""
+    on_self, other = set(), set()
+    args = getattr(node, "args", None)
+    local = {a.arg for a in (args.args + args.kwonlyargs if args else [])}
+    local |= {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    for c in _own_calls(node):
+        f = c.args[0] if _dotted(c.func).split(".")[-1] == "partial" and c.args else c.func
+        if isinstance(f, ast.Attribute):
+            if isinstance(f.value, ast.Name) and f.value.id in ("self", "cls"):
+                on_self.add(f.attr)
+            elif not isinstance(f.value, ast.Name) or f.value.id in local:  # asyncio.run() is not an object's run
+                other.add(f.attr)
+        elif isinstance(f, ast.Name):
+            other.add(f.id)
+    return on_self - other
+
+
+def _calls_and_picks(node: ast.AST) -> tuple[list[tuple[str, int]], dict[str, set[str]]]:
+    """Every call's simple name - a callable handed to functools.partial counts as called - and, per callee, the
+    prompt names passed to it as string literals."""
+    calls: list[tuple[str, int]] = []
+    picks: dict[str, set[str]] = {}
+    for c in _own_calls(node):
+        name = _dotted(c.func).replace("()", "").split(".")[-1]
+        target, args = name, c
+        if name == "partial" and c.args:  # functools.partial(self._run, prompt="...") is a call to come
+            target = _dotted(c.args[0]).replace("()", "").split(".")[-1]
+            calls.append((target, c.lineno))
+        calls.append((name, c.lineno))
+        for k in args.keywords:
+            if k.arg and _PICK_PARAMS.match(k.arg):  # prompt="reflect", or prompt=choose_prompt()
+                lit = k.value.value if isinstance(k.value, ast.Constant) and isinstance(k.value.value, str) else None
+                picks.setdefault(target, set()).add(lit or f"<{k.arg}@{c.lineno}>")
+    return calls, picks
+
+
+def _picks_prompt(fn: _Fn, ups: list[_Fn]) -> bool:
+    """Is fn a shared model call whose callers each choose the prompt it renders? Then each caller is a step of its
+    own (the reflection step, the test-generation step), not one agent called from many places."""
+    params = {a.arg for a in getattr(getattr(fn.node, "args", None), "args", []) + getattr(
+        getattr(fn.node, "args", None), "kwonlyargs", [])}
+    if not any(_PICK_PARAMS.match(p) for p in params):
+        return False
+    # named prompts decide it (prompt="reflect" here, prompt="review" there); a caller passing a variable only joins
+    chosen = [frozenset(p for p in c.picks.get(fn.name, ()) if not p.startswith("<")) for c in ups]
+    return sum(1 for x in chosen if x) >= 2 and len({x for x in chosen if x}) >= 2
 
 
 def class_llm_methods(files: list[SourceFile]) -> dict[str, set[str]]:

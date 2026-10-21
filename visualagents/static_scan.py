@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import blueprint as bpmod
-from . import call_sites
+from . import call_sites, run_order
 from .collector import SKIP_DIRS, SourceFile, collect, is_test_file
 
 AGENT_CLASSES = {
@@ -60,7 +60,7 @@ DSPY_PREDICTORS = {"Predict", "ChainOfThought", "ChainOfThoughtWithHint", "ReAct
 # graph-building calls: LangGraph's where it is imported, a project's own workflow API (literal node names) where no
 # graph library is, and nothing in files that build networkx / graphviz graphs
 GRAPH_CALLS = {"add_node", "add_edge", "add_conditional_edges", "set_entry_point", "set_finish_point", "Command"}
-OTHER_GRAPH_LIBS = ("networkx", "graphviz", "pygraphviz", "pydot", "igraph", "rustworkx", "dgl", "torch_geometric")
+OTHER_GRAPH_LIBS = ("networkx", "pyvis", "graphviz", "pygraphviz", "pydot", "igraph", "rustworkx", "dgl", "torch_geometric")
 # a project's own agent base class: BaseAgent, LLMAgent, AbstractAgent, AgentBase, Role
 OWN_AGENT_BASE = re.compile(r"(Agent|AgentBase|Role)$")
 # config keys that list the roles a run uses: session.roles, default_agents, WORKERS
@@ -99,6 +99,7 @@ class _Collector:
         self.on_their_own: set[str] = set()  # model callers with no known caller: each its own start and end
         self.unused_classes: list[dict[str, str]] = []  # agent classes nothing in the project creates or names
         self.class_defs: tuple[list[Any], set[str]] | None = None  # every class of the project, parsed once
+        self.own_defs: dict[str, ast.AST] = {}  # the functions the project defines at module level, by name
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -226,6 +227,17 @@ def _assigned_names(parent: ast.AST) -> list[str]:
     return []
 
 
+def _imported_names(tree: ast.AST) -> set[str]:
+    """Names brought in by `from x import name` from a framework (not from the project's own modules)."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if any(node.module == p or node.module.startswith(p + ".") or node.module.startswith("langchain_")
+                   for _, prefixes in FRAMEWORK_IMPORTS for p in prefixes):
+                out |= {a.asname or a.name for a in node.names}
+    return out
+
+
 def _imported_modules(tree: ast.AST) -> set[str]:
     out: set[str] = set()
     for node in ast.walk(tree):
@@ -236,9 +248,15 @@ def _imported_modules(tree: ast.AST) -> set[str]:
     return out
 
 
+# parts of a framework that only prepare data (split text, load files) - importing one builds no agent
+UTILITY_IMPORTS = ("langchain_text_splitters", "langchain.text_splitter", "langchain.document_loaders",
+                   "langchain_community.document_loaders", "llama_index.core.node_parser", "llama_index.readers")
+
+
 def _frameworks_imported(modules: set[str], src: SourceFile, root: Path) -> list[str]:
     """Frameworks a file imports. A framework's name in a URL or a comment is not an import, and
     `from agents import ...` is the OpenAI Agents SDK only when the project has no agents module of its own."""
+    modules = {m for m in modules if not any(m == u or m.startswith(u + ".") for u in UTILITY_IMPORTS)}
     found = []
     for fw, prefixes in FRAMEWORK_IMPORTS:
         if any(m == p or m.startswith(p + ".") or (p == "langchain" and m.startswith("langchain_"))
@@ -444,6 +462,11 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
         if name in AGENT_CLASSES or name in AGENT_FACTORIES or (name.endswith("Agent") and node.keywords):
             if name in {"create_handoff_tool"}:
                 continue
+            own = c.own_defs.get(name) if isinstance(node.func, ast.Name) else None
+            if name in AGENT_FACTORIES and own is not None and name not in _imported_names(tree) and not any(
+                    isinstance(n, ast.Call) and _call_name(n) in AGENT_FACTORIES | AGENT_CLASSES
+                    for n in ast.walk(own)):
+                continue  # the project's own create_agent() that compiles its graph - not a wrapper of a factory
             agent_name = _lit(_kw(node, "name", "agent_name"))
             role = _lit(_kw(node, *ROLE_KWARGS)) or ""
             if not agent_name and name == "Agent" and _kw(node, "role") is not None:
@@ -1127,7 +1150,13 @@ def _named_instances(files: list[SourceFile], c: _Collector) -> None:
                 out |= methods(b, seen | {cls})
         return out
 
-    classes = {name for name in bases if methods(name)}  # the project's classes that talk to a model
+    def framework_agent(cls: str, seen: frozenset = frozenset()) -> bool:  # MyProxy(UserProxyAgent)
+        return any(b in AGENT_CLASSES or (b not in seen and framework_agent(b, seen | {cls}))
+                   for b in bases.get(cls, ()))
+
+    # the project's classes that talk to a model, or that extend a framework's agent class: each named instance of
+    # one (MyProxy(name="user"), MyProxy(name="executor")) is an agent of its own
+    classes = {name for name in bases if methods(name) or framework_agent(name)}
     if not classes:
         return
     consts: dict[str, list[str]] = {}  # NAMES = ["Affirmative side", "Negative side", "Moderator"]
@@ -1381,6 +1410,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
             tree = _parse(f)
             if tree is not None:
                 c.trees[f.rel] = tree
+                c.own_defs.update({n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
                 c.project_frameworks.update(_frameworks_imported(_imported_modules(tree), f, c.root))
     for f in files:
         ext = f.path.suffix.lower()
@@ -1454,9 +1484,11 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
 
     _scan_classes(files, c)
     _fold_into_nodes(c, files)
+    run_order.subgraphs_run_in_nodes(c)
     _link_subgraphs(c)
     _named_instances(files, c)
     _message_routes(files, c)
+    run_order.link(c)
 
     # no framework: every place that calls an LLM is an agent, even when there is only one
     if not c.agents:
@@ -1464,13 +1496,23 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
         for a in found["agents"]:
             c.add_agent(a["name"], file=a["file"], line=a["line"], role=a["role"], description=a["description"],
                         tools=a["tools"], aliases=a["aliases"] + sorted(c.instances.get(a["name"], ())))
-        c.edges += found["edges"]
+        in_order = [e for e in found["edges"] if e.pop("_pipeline", False)]  # call order, branches ignored
+        c.edges += [e for e in found["edges"] if e not in in_order]
         if not found["edges"]:  # independent features (chat, export, titles): each starts and ends on its own
             c.entry += [a["name"] for a in found["agents"]]
             c.exits += [a["name"] for a in found["agents"]]
             c.on_their_own = {a["name"] for a in found["agents"]}
         if found["agents"]:
             c.vote("custom", 1)
+            before = len(c.edges)
+            run_order.link(c)  # the order an orchestrator runs them in, through its helpers and branches
+            if len(c.edges) == before:  # nothing followed: keep the plain call order
+                c.edges += in_order
+            if len(c.edges) > before and c.on_their_own:  # linked now: not each its own start and end
+                to = {bpmod.norm_key(e["to"]) for e in c.edges[before:]}
+                frm = {bpmod.norm_key(e["from"]) for e in c.edges[before:]}
+                c.entry = [e for e in c.entry if not (e in c.on_their_own and bpmod.norm_key(e) in to)]
+                c.exits = [x for x in c.exits if not (x in c.on_their_own and bpmod.norm_key(x) in frm)]
 
     # generic fallback: classes named *Agent with a run-ish method
     if not c.agents:
@@ -1493,6 +1535,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     for e in c.edges:
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
+    _drop_example_agents(c)
+
     if facts is not None:
         found = (("ports", _ports(c)), ("config_lists", _config_lists(c, files)), ("factories", _factories(c)),
                  ("script_pipelines", pipelines), ("agent_classes_never_used", c.unused_classes))
@@ -1514,6 +1558,28 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     for a in raw["agents"]:
         a["keywords"] = _keywords_for(a)
     return bpmod.stamp(bpmod.normalize(raw), "static")
+
+
+EXAMPLE_DIRS = re.compile(r"(^|/)(examples?|samples?|demos?|cookbooks?)(/|$)", re.I)
+
+
+def _drop_example_agents(c: _Collector) -> None:
+    """Agents defined only under examples/ (samples/, demos/) show how to use the project; when the project wires
+    agents of its own together outside them (a graph, hand-offs), that is the system and the examples stay off the
+    map. Loose agents outside examples/ are not enough: many projects keep their real systems in examples/."""
+    def only_examples(key: str, agent: dict[str, Any]) -> bool:
+        files = [f for f, _ in c.sites.get(key, [])] or [agent["file"]]
+        return all(f and EXAMPLE_DIRS.search(f.replace(os.sep, "/")) for f in files)
+
+    example = {k for k, a in c.agents.items() if only_examples(k, a)}
+    own: set[str] = set()
+    for k, a in c.agents.items():
+        if k not in example:
+            own |= {bpmod.norm_key(n) for n in (k, a["name"], *a["aliases"])}
+    wired = any(bpmod.norm_key(e["from"]) in own and bpmod.norm_key(e["to"]) in own for e in c.edges)
+    if example and wired:
+        for k in example:
+            del c.agents[k]
 
 
 def _keywords_for(agent: dict[str, Any]) -> list[str]:

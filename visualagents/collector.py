@@ -36,6 +36,9 @@ TOOL_CONFIGS = re.compile(
 )
 CONFIG_EXTS = {".yaml", ".yml", ".toml", ".json", ".md"}
 MAX_FILE_BYTES = 400_000
+# Folders that keep an earlier implementation next to the current one (src/legacy/, old/, deprecated/): their agents
+# are not part of today's system, as long as there is code outside them.
+SUPERSEDED_DIRS = re.compile(r"^(legacy|deprecated|obsolete|old|_old|attic)$", re.I)
 
 AGENT_HINTS = re.compile(
     r"\b(agent|agents|crew|crewai|autogen|langgraph|langchain|StateGraph|add_node|add_edge|handoff|"
@@ -194,10 +197,28 @@ def collect(root: Path, max_files: int = 400) -> list[SourceFile]:
         out.append(SourceFile(p, rel, text, score))
         if len(out) >= max_files * 4:
             break
+    out = drop_superseded(out)
     for f in _mark_agent_files(out):
         f.score += AGENT_FILE_BONUS
     out.sort(key=lambda f: (-f.score, f.rel))
     return out[:max_files]
+
+
+def superseded(rel: str) -> bool:
+    """Is this file inside a folder that keeps an older implementation (legacy/, deprecated/, old/)?"""
+    return any(SUPERSEDED_DIRS.match(part) for part in Path(rel).parts[:-1])
+
+
+def drop_superseded(files: list[SourceFile]) -> list[SourceFile]:
+    """Leave out the older implementation kept in legacy/ (or deprecated/, old/) folders - unless the project's code
+    lives only there."""
+    code = (".py", ".ipynb", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".jsx")
+    old = [f for f in files if superseded(f.rel)]
+    current = [f for f in files if not superseded(f.rel) and f.path.suffix.lower() in code
+               and f.path.name not in {"setup.py", "conftest.py", "noxfile.py", "__init__.py"}]
+    if not old or not current:  # a setup.py next to legacy/ is not a newer implementation
+        return files
+    return [f for f in files if not superseded(f.rel)]
 
 
 def _classes(f: SourceFile) -> list[ast.ClassDef]:
