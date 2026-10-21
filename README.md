@@ -107,7 +107,7 @@ Three questions, then your agents' map pops up:
 2/3 Which LLM should read the code and draw the map?
   ✔ Google Gemini
   Model
-  ✔ gemini-2.5-flash
+  ✔ gemini-flash-latest
 
 3/3 Google Gemini API key
   Paste it below - it stays hidden · get one at https://aistudio.google.com/apikey · empty = skip
@@ -272,9 +272,11 @@ flowchart LR
 ```bash
 visualagents models                                   # which providers have keys, and their defaults
 visualagents models --provider google                 # every model your account can use
-visualagents scan . --provider google --model gemini-2.5-flash
+visualagents scan . --provider google --model gemini-flash-latest
 visualagents scan . --static                          # offline only
 ```
+
+A free Gemini key has no quota for the Pro models: pick `gemini-flash-latest` there, or enable billing on the key.
 
 Keys and choices are read from, in order: your shell environment, the project's `.env`, then what the guided
 start saved. You can also set `VISUALAGENTS_PROVIDER`, `VISUALAGENTS_MODEL` and `VISUALAGENTS_NARRATE_MODEL`.

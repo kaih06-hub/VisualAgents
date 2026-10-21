@@ -19,8 +19,10 @@ from .server import Server
 
 DAEMON_PORT = 7400
 _GIT_URL = re.compile(r"^(https?://|git@|ssh://)\S+$|\.git$")
+# Google's -latest aliases follow its current models, so a choice here cannot be retired from under the user
+# (pinned versions are: gemini-2.5-pro already is for new keys). Pro has no free-tier quota.
 MODEL_CHOICES = {
-    "google": [("gemini-pro-latest", "best"), ("gemini-2.5-flash", "fast, cheap"),
+    "google": [("gemini-pro-latest", "best, needs billing on the key"), ("gemini-flash-latest", "fast, works on a free key"),
                ("gemini-flash-lite-latest", "cheapest")],
     "anthropic": [("claude-opus-5-5", "best"), ("claude-sonnet-5-5", "faster, cheaper"),
                   ("claude-haiku-5-5", "cheapest")],

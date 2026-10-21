@@ -12,7 +12,12 @@
   - an app with no mapped agents shows each caller as its own agent instead of nothing.
   - hook mode now wakes for CrewAI, AutoGen and other frameworks that print their own agents.
 
+### Changed
+- The guided start offers `gemini-flash-latest` instead of the pinned `gemini-2.5-flash`, and says that Gemini Pro
+  needs billing on the key (a free key has no Pro quota).
+
 ### Fixed
+- Start-command detection reads a project's console scripts on Python 3.10 too (no `tomllib` there).
 - Start-command detection: a project's own console scripts in its README count as start commands, an interactive
   chat command is preferred over a server or a web front end in a subfolder, and they run from the project's
   virtualenv. A missing command now says so instead of exiting silently.
