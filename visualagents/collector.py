@@ -67,10 +67,10 @@ def is_test_file(rel: str, text: str | None = None) -> bool:
         return False
     if text is None or _TEST_CODE.search(text):
         return True
-    # test functions a runner collects: the module never calls them itself (a script's test_report(...) it runs
-    # from __main__ is its own code)
+    # test functions a runner collects: the module never mentions them again (a script's test_report(...) it runs
+    # from __main__, or an agent's instruction=test_runner_instruction_provider, is its own code)
     tests = _TEST_FUNC.findall(text)
-    return any(len(re.findall(rf"\b{t}\s*\(", text)) == 1 for t in tests)
+    return any(len(re.findall(rf"\b{t}\b", text)) == 1 for t in tests)
 
 
 # Classes that are agents by name, or by what they inherit from (directly or through the project's own classes).

@@ -226,3 +226,30 @@ def test_the_runtime_works_when_installed_under_an_agents_folder(tmp_path):
 
     call = plan_trip()
     assert not call.off and call.agent == "plan_trip"
+
+
+def test_an_agent_named_like_a_test_is_part_of_the_project(tmp_path):
+    """sub_agents/test_runner.py builds the agent that runs the user's tests; tests/ or a pytest module is a test."""
+    from visualagents.collector import is_test_file
+
+    runner = (
+        "from google.adk.agents import Agent\n"
+        "async def test_runner_instruction_provider(context):\n"
+        "    return 'Run the tests in the submitted code and report failures.'\n"
+        "test_runner_agent = Agent(name='TestRunner', model='gemini-2.5-pro',\n"
+        "                          instruction=test_runner_instruction_provider)\n")
+    pytest_module = "from review import analyzer\ndef test_analyzer_scores_style():\n    assert analyzer.score('x') >= 0\n"
+    assert not is_test_file("review/sub_agents/test_runner.py", runner)
+    assert is_test_file("review/test_analyzer.py", pytest_module)
+    assert is_test_file("tests/test_runner.py", runner)  # anything in a tests folder still is
+
+    _write(tmp_path, {
+        "review/agent.py": (
+            "from google.adk.agents import Agent, SequentialAgent\n"
+            "from review.sub_agents.test_runner import test_runner_agent\n"
+            "analyzer = Agent(name='CodeAnalyzer', model='gemini-2.5-flash', instruction='Analyse the code')\n"
+            "pipeline = SequentialAgent(name='ReviewPipeline', sub_agents=[analyzer, test_runner_agent])\n"),
+        "review/sub_agents/test_runner.py": runner,
+        "review/test_analyzer.py": pytest_module,
+    })
+    assert "testrunner" in {a["id"].replace("_", "") for a in scan(tmp_path)["agents"]}
