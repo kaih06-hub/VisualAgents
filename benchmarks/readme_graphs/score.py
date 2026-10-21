@@ -134,8 +134,8 @@ def keys(agent):
     return [re.sub(r"[^a-z0-9]+", "_", k.lower()).strip("_") for k in out if k]
 
 
-def score(repo, bp):
-    g = GT[repo]
+def score(repo, bp, gt=None):
+    g = (gt or GT)[repo]
     multi = g.get("multi", set())
     pred2gt, used, dup, wrong, extra = {}, set(), [], [], []
     for a in bp["agents"]:
@@ -183,6 +183,7 @@ def score(repo, bp):
         "matched_nodes": sorted(used), "missed_nodes": sorted(set(g["nodes"]) - used),
         "duplicates": dup, "wrong": wrong, "code_real_extras": extra,
         "node_recall": len(used) / len(g["nodes"]),
+        "node_recall_code": len(used - set(g.get("readme_only", ()))) / len(set(g["nodes"]) - set(g.get("readme_only", ()))),
         "node_precision_strict": (len(pred2gt)) / n_pred if n_pred else 0.0,
         "node_precision_lenient": (len(pred2gt) + len(extra)) / n_pred if n_pred else 0.0,
         "gt_edges": len(gt_edges), "pred_edges": len(bp["edges"]),
@@ -192,12 +193,19 @@ def score(repo, bp):
     }
 
 
+def sets():
+    sys.path.insert(0, str(Path(__file__).parent))
+    from ground_truth_set2 import GT2
+    return {"set1": GT, "set2": GT2}
+
+
 if __name__ == "__main__":
     d = Path(sys.argv[1])
-    rows = [score(r, json.load(open(d / f"{r}.json"))) for r in GT]
+    gt = sets()[sys.argv[2] if len(sys.argv) > 2 else "set1"]
+    rows = [score(r, json.load(open(d / f"{r}.json")), gt) for r in gt]
     json.dump(rows, open(d / "scores.json", "w"), indent=1)
-    keys_ = ("node_recall", "node_precision_strict", "node_precision_lenient", "edge_recall", "edge_precision")
-    print(f"{'repo':32} {'fw':14} " + " ".join(f"{k[:14]:>14}" for k in keys_))
+    keys_ = ("node_recall", "node_recall_code", "node_precision_strict", "node_precision_lenient", "edge_recall", "edge_precision")
+    print(f"{'repo':32} {'fw':14} " + " ".join(f"{k[5:19]:>14}" for k in keys_))
     for r in rows:
         print(f"{r['repo']:32} {r['framework_detected']:14} " + " ".join(f"{r[k]:14.2f}" for k in keys_))
     print(f"{'MEAN':47} " + " ".join(f"{sum(r[k] for r in rows) / len(rows):14.2f}" for k in keys_))

@@ -1,0 +1,1269 @@
+{
+ "date": "2026-10-21",
+ "mode": "static",
+ "set": "set2",
+ "before_commit": "3a79861",
+ "results_before": [
+  {
+   "repo": "data-enrichment",
+   "framework_detected": "langgraph",
+   "gt_nodes": 4,
+   "pred_nodes": 3,
+   "matched_nodes": [
+    "CallModel",
+    "Checker",
+    "Tools"
+   ],
+   "missed_nodes": [
+    "Correction"
+   ],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 0.75,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 6,
+   "pred_edges": 4,
+   "matched_edges": [
+    [
+     "CallModel",
+     "Checker"
+    ],
+    [
+     "CallModel",
+     "Tools"
+    ],
+    [
+     "Checker",
+     "CallModel"
+    ],
+    [
+     "Tools",
+     "CallModel"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "CallModel",
+     "Correction"
+    ],
+    [
+     "Correction",
+     "CallModel"
+    ]
+   ],
+   "edge_recall": 0.6666666666666666,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "langgraph-reflection",
+   "framework_detected": "langgraph",
+   "gt_nodes": 2,
+   "pred_nodes": 5,
+   "matched_nodes": [
+    "Graph",
+    "Reflection"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "call_model",
+    "judge_response",
+    "try_running"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.4,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 2,
+   "pred_edges": 2,
+   "matched_edges": [
+    [
+     "Graph",
+     "Reflection"
+    ],
+    [
+     "Reflection",
+     "Graph"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "sales-outreach-automation-langgraph",
+   "framework_detected": "langgraph",
+   "gt_nodes": 18,
+   "pred_nodes": 18,
+   "matched_nodes": [
+    "analyze_blog_content",
+    "analyze_recent_news",
+    "analyze_social_media_content",
+    "await_reports_creation",
+    "check_for_remaining_leads",
+    "collect_company_information",
+    "create_outreach_materials",
+    "fetch_linkedin_profile_data",
+    "generate_custom_outreach_report",
+    "generate_digital_presence_report",
+    "generate_full_lead_research_report",
+    "generate_interview_script",
+    "generate_personalized_email",
+    "get_new_leads",
+    "review_company_website",
+    "save_reports_to_google_docs",
+    "score_lead",
+    "update_crm"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 22,
+   "pred_edges": 22,
+   "matched_edges": [
+    [
+     "analyze_blog_content",
+     "generate_digital_presence_report"
+    ],
+    [
+     "analyze_recent_news",
+     "generate_digital_presence_report"
+    ],
+    [
+     "analyze_social_media_content",
+     "generate_digital_presence_report"
+    ],
+    [
+     "await_reports_creation",
+     "save_reports_to_google_docs"
+    ],
+    [
+     "check_for_remaining_leads",
+     "fetch_linkedin_profile_data"
+    ],
+    [
+     "collect_company_information",
+     "analyze_blog_content"
+    ],
+    [
+     "collect_company_information",
+     "analyze_recent_news"
+    ],
+    [
+     "collect_company_information",
+     "analyze_social_media_content"
+    ],
+    [
+     "create_outreach_materials",
+     "generate_interview_script"
+    ],
+    [
+     "create_outreach_materials",
+     "generate_personalized_email"
+    ],
+    [
+     "fetch_linkedin_profile_data",
+     "review_company_website"
+    ],
+    [
+     "generate_custom_outreach_report",
+     "create_outreach_materials"
+    ],
+    [
+     "generate_digital_presence_report",
+     "generate_full_lead_research_report"
+    ],
+    [
+     "generate_full_lead_research_report",
+     "score_lead"
+    ],
+    [
+     "generate_interview_script",
+     "await_reports_creation"
+    ],
+    [
+     "generate_personalized_email",
+     "await_reports_creation"
+    ],
+    [
+     "get_new_leads",
+     "check_for_remaining_leads"
+    ],
+    [
+     "review_company_website",
+     "collect_company_information"
+    ],
+    [
+     "save_reports_to_google_docs",
+     "update_crm"
+    ],
+    [
+     "score_lead",
+     "generate_custom_outreach_report"
+    ],
+    [
+     "score_lead",
+     "save_reports_to_google_docs"
+    ],
+    [
+     "update_crm",
+     "check_for_remaining_leads"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "Controllable-RAG-Agent",
+   "framework_detected": "langgraph",
+   "gt_nodes": 12,
+   "pred_nodes": 21,
+   "matched_nodes": [
+    "Anonymize",
+    "Answer",
+    "BreakDown",
+    "DeAnonymize",
+    "FinalAnswer",
+    "KeepRelevant",
+    "Planner",
+    "Replan",
+    "RetrieveChunks",
+    "RetrieveQuotes",
+    "RetrieveSummaries",
+    "TaskHandler"
+   ],
+   "missed_nodes": [],
+   "duplicates": [
+    "break_down_plan_to_retrieve_or_answer",
+    "retrieve_book_chunks"
+   ],
+   "wrong": [
+    "plan_and_execute_app"
+   ],
+   "code_real_extras": [
+    "retrieve_context_per_question",
+    "rewrite_question",
+    "answer_question_from_context",
+    "retrieve_chunks_context_per_question",
+    "retrieve_summaries_context_per_question",
+    "retrieve_book_quotes_context_per_question"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.5714285714285714,
+   "node_precision_lenient": 0.8571428571428571,
+   "gt_edges": 15,
+   "pred_edges": 30,
+   "matched_edges": [
+    [
+     "Anonymize",
+     "Planner"
+    ],
+    [
+     "Answer",
+     "Replan"
+    ],
+    [
+     "BreakDown",
+     "TaskHandler"
+    ],
+    [
+     "DeAnonymize",
+     "BreakDown"
+    ],
+    [
+     "KeepRelevant",
+     "Replan"
+    ],
+    [
+     "Planner",
+     "DeAnonymize"
+    ],
+    [
+     "Replan",
+     "BreakDown"
+    ],
+    [
+     "Replan",
+     "FinalAnswer"
+    ],
+    [
+     "RetrieveQuotes",
+     "KeepRelevant"
+    ],
+    [
+     "RetrieveSummaries",
+     "KeepRelevant"
+    ],
+    [
+     "TaskHandler",
+     "Answer"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveChunks"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveQuotes"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveSummaries"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "RetrieveChunks",
+     "KeepRelevant"
+    ]
+   ],
+   "edge_recall": 0.9333333333333333,
+   "edge_precision": 0.8235294117647058
+  },
+  {
+   "repo": "retrieval-agent-template",
+   "framework_detected": "langgraph",
+   "gt_nodes": 3,
+   "pred_nodes": 4,
+   "matched_nodes": [
+    "GenerateQuery",
+    "Respond",
+    "Retrieve"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "index_docs"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.75,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 2,
+   "pred_edges": 2,
+   "matched_edges": [
+    [
+     "GenerateQuery",
+     "Retrieve"
+    ],
+    [
+     "Retrieve",
+     "Respond"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "financial_research_agent",
+   "framework_detected": "openai-agents",
+   "gt_nodes": 6,
+   "pred_nodes": 6,
+   "matched_nodes": [
+    "Fundamentals",
+    "Planner",
+    "Risk",
+    "Search",
+    "Verifier",
+    "Writer"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 5,
+   "pred_edges": 0,
+   "matched_edges": [],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "Planner",
+     "Search"
+    ],
+    [
+     "Search",
+     "Writer"
+    ],
+    [
+     "Writer",
+     "Fundamentals"
+    ],
+    [
+     "Writer",
+     "Risk"
+    ],
+    [
+     "Writer",
+     "Verifier"
+    ]
+   ],
+   "edge_recall": 0.0,
+   "edge_precision": 0.0
+  },
+  {
+   "repo": "Agent-E",
+   "framework_detected": "autogen",
+   "gt_nodes": 3,
+   "pred_nodes": 3,
+   "matched_nodes": [
+    "BrowserNav",
+    "Human",
+    "Planner"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 4,
+   "pred_edges": 0,
+   "matched_edges": [],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "BrowserNav",
+     "Planner"
+    ],
+    [
+     "Human",
+     "Planner"
+    ],
+    [
+     "Planner",
+     "BrowserNav"
+    ],
+    [
+     "Planner",
+     "Human"
+    ]
+   ],
+   "edge_recall": 0.0,
+   "edge_precision": 0.0
+  },
+  {
+   "repo": "translation-agent",
+   "framework_detected": "langchain",
+   "gt_nodes": 3,
+   "pred_nodes": 7,
+   "matched_nodes": [
+    "Improve",
+    "Reflect",
+    "Translate"
+   ],
+   "missed_nodes": [],
+   "duplicates": [
+    "multichunk_initial_translation",
+    "multichunk_reflect_on_translation",
+    "multichunk_improve_translation"
+   ],
+   "wrong": [
+    "patch"
+   ],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.42857142857142855,
+   "node_precision_lenient": 0.42857142857142855,
+   "gt_edges": 2,
+   "pred_edges": 4,
+   "matched_edges": [
+    [
+     "Reflect",
+     "Improve"
+    ],
+    [
+     "Translate",
+     "Reflect"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "AlphaCodium",
+   "framework_detected": "custom",
+   "gt_nodes": 8,
+   "pred_nodes": 2,
+   "matched_nodes": [],
+   "missed_nodes": [
+    "AITests",
+    "InitialCode",
+    "IterateAI",
+    "IteratePublic",
+    "PossibleSolutions",
+    "PublicTestsReasoning",
+    "RankSolutions",
+    "Reflection"
+   ],
+   "duplicates": [],
+   "wrong": [
+    "code_contests_competitor",
+    "simple_prompt"
+   ],
+   "code_real_extras": [],
+   "node_recall": 0.0,
+   "node_recall_code": 0.0,
+   "node_precision_strict": 0.0,
+   "node_precision_lenient": 0.0,
+   "gt_edges": 7,
+   "pred_edges": 0,
+   "matched_edges": [],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "AITests",
+     "InitialCode"
+    ],
+    [
+     "InitialCode",
+     "IteratePublic"
+    ],
+    [
+     "IteratePublic",
+     "IterateAI"
+    ],
+    [
+     "PossibleSolutions",
+     "RankSolutions"
+    ],
+    [
+     "PublicTestsReasoning",
+     "PossibleSolutions"
+    ],
+    [
+     "RankSolutions",
+     "AITests"
+    ],
+    [
+     "Reflection",
+     "PublicTestsReasoning"
+    ]
+   ],
+   "edge_recall": 0.0,
+   "edge_precision": 0.0
+  },
+  {
+   "repo": "WikiChat",
+   "framework_detected": "langgraph",
+   "gt_nodes": 8,
+   "pred_nodes": 8,
+   "matched_nodes": [
+    "Draft",
+    "ExtractClaims",
+    "Generate",
+    "Query",
+    "Refine",
+    "Retrieve",
+    "SummarizeFilter"
+   ],
+   "missed_nodes": [
+    "FactCheck"
+   ],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "shift_references"
+   ],
+   "node_recall": 0.875,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.875,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 7,
+   "pred_edges": 7,
+   "matched_edges": [
+    [
+     "Draft",
+     "Refine"
+    ],
+    [
+     "Generate",
+     "ExtractClaims"
+    ],
+    [
+     "Query",
+     "Retrieve"
+    ],
+    [
+     "Retrieve",
+     "SummarizeFilter"
+    ],
+    [
+     "SummarizeFilter",
+     "Draft"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "ExtractClaims",
+     "FactCheck"
+    ],
+    [
+     "FactCheck",
+     "Draft"
+    ]
+   ],
+   "edge_recall": 0.7142857142857143,
+   "edge_precision": 0.8333333333333334
+  }
+ ],
+ "results_after": [
+  {
+   "repo": "data-enrichment",
+   "framework_detected": "langgraph",
+   "gt_nodes": 4,
+   "pred_nodes": 3,
+   "matched_nodes": [
+    "CallModel",
+    "Checker",
+    "Tools"
+   ],
+   "missed_nodes": [
+    "Correction"
+   ],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 0.75,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 6,
+   "pred_edges": 4,
+   "matched_edges": [
+    [
+     "CallModel",
+     "Checker"
+    ],
+    [
+     "CallModel",
+     "Tools"
+    ],
+    [
+     "Checker",
+     "CallModel"
+    ],
+    [
+     "Tools",
+     "CallModel"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "CallModel",
+     "Correction"
+    ],
+    [
+     "Correction",
+     "CallModel"
+    ]
+   ],
+   "edge_recall": 0.6666666666666666,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "langgraph-reflection",
+   "framework_detected": "langgraph",
+   "gt_nodes": 2,
+   "pred_nodes": 2,
+   "matched_nodes": [
+    "Graph",
+    "Reflection"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 2,
+   "pred_edges": 2,
+   "matched_edges": [
+    [
+     "Graph",
+     "Reflection"
+    ],
+    [
+     "Reflection",
+     "Graph"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "sales-outreach-automation-langgraph",
+   "framework_detected": "langgraph",
+   "gt_nodes": 18,
+   "pred_nodes": 18,
+   "matched_nodes": [
+    "analyze_blog_content",
+    "analyze_recent_news",
+    "analyze_social_media_content",
+    "await_reports_creation",
+    "check_for_remaining_leads",
+    "collect_company_information",
+    "create_outreach_materials",
+    "fetch_linkedin_profile_data",
+    "generate_custom_outreach_report",
+    "generate_digital_presence_report",
+    "generate_full_lead_research_report",
+    "generate_interview_script",
+    "generate_personalized_email",
+    "get_new_leads",
+    "review_company_website",
+    "save_reports_to_google_docs",
+    "score_lead",
+    "update_crm"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 22,
+   "pred_edges": 22,
+   "matched_edges": [
+    [
+     "analyze_blog_content",
+     "generate_digital_presence_report"
+    ],
+    [
+     "analyze_recent_news",
+     "generate_digital_presence_report"
+    ],
+    [
+     "analyze_social_media_content",
+     "generate_digital_presence_report"
+    ],
+    [
+     "await_reports_creation",
+     "save_reports_to_google_docs"
+    ],
+    [
+     "check_for_remaining_leads",
+     "fetch_linkedin_profile_data"
+    ],
+    [
+     "collect_company_information",
+     "analyze_blog_content"
+    ],
+    [
+     "collect_company_information",
+     "analyze_recent_news"
+    ],
+    [
+     "collect_company_information",
+     "analyze_social_media_content"
+    ],
+    [
+     "create_outreach_materials",
+     "generate_interview_script"
+    ],
+    [
+     "create_outreach_materials",
+     "generate_personalized_email"
+    ],
+    [
+     "fetch_linkedin_profile_data",
+     "review_company_website"
+    ],
+    [
+     "generate_custom_outreach_report",
+     "create_outreach_materials"
+    ],
+    [
+     "generate_digital_presence_report",
+     "generate_full_lead_research_report"
+    ],
+    [
+     "generate_full_lead_research_report",
+     "score_lead"
+    ],
+    [
+     "generate_interview_script",
+     "await_reports_creation"
+    ],
+    [
+     "generate_personalized_email",
+     "await_reports_creation"
+    ],
+    [
+     "get_new_leads",
+     "check_for_remaining_leads"
+    ],
+    [
+     "review_company_website",
+     "collect_company_information"
+    ],
+    [
+     "save_reports_to_google_docs",
+     "update_crm"
+    ],
+    [
+     "score_lead",
+     "generate_custom_outreach_report"
+    ],
+    [
+     "score_lead",
+     "save_reports_to_google_docs"
+    ],
+    [
+     "update_crm",
+     "check_for_remaining_leads"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "Controllable-RAG-Agent",
+   "framework_detected": "langgraph",
+   "gt_nodes": 12,
+   "pred_nodes": 20,
+   "matched_nodes": [
+    "Anonymize",
+    "Answer",
+    "BreakDown",
+    "DeAnonymize",
+    "FinalAnswer",
+    "KeepRelevant",
+    "Planner",
+    "Replan",
+    "RetrieveChunks",
+    "RetrieveQuotes",
+    "RetrieveSummaries",
+    "TaskHandler"
+   ],
+   "missed_nodes": [],
+   "duplicates": [
+    "break_down_plan_to_retrieve_or_answer",
+    "retrieve_book_chunks"
+   ],
+   "wrong": [],
+   "code_real_extras": [
+    "retrieve_context_per_question",
+    "rewrite_question",
+    "answer_question_from_context",
+    "retrieve_chunks_context_per_question",
+    "retrieve_summaries_context_per_question",
+    "retrieve_book_quotes_context_per_question"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.6,
+   "node_precision_lenient": 0.9,
+   "gt_edges": 15,
+   "pred_edges": 31,
+   "matched_edges": [
+    [
+     "Anonymize",
+     "Planner"
+    ],
+    [
+     "Answer",
+     "Replan"
+    ],
+    [
+     "BreakDown",
+     "TaskHandler"
+    ],
+    [
+     "DeAnonymize",
+     "BreakDown"
+    ],
+    [
+     "KeepRelevant",
+     "Replan"
+    ],
+    [
+     "Planner",
+     "DeAnonymize"
+    ],
+    [
+     "Replan",
+     "BreakDown"
+    ],
+    [
+     "Replan",
+     "FinalAnswer"
+    ],
+    [
+     "RetrieveQuotes",
+     "KeepRelevant"
+    ],
+    [
+     "RetrieveSummaries",
+     "KeepRelevant"
+    ],
+    [
+     "TaskHandler",
+     "Answer"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveChunks"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveQuotes"
+    ],
+    [
+     "TaskHandler",
+     "RetrieveSummaries"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "RetrieveChunks",
+     "KeepRelevant"
+    ]
+   ],
+   "edge_recall": 0.9333333333333333,
+   "edge_precision": 0.8235294117647058
+  },
+  {
+   "repo": "retrieval-agent-template",
+   "framework_detected": "langgraph",
+   "gt_nodes": 3,
+   "pred_nodes": 4,
+   "matched_nodes": [
+    "GenerateQuery",
+    "Respond",
+    "Retrieve"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "index_docs"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.75,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 2,
+   "pred_edges": 2,
+   "matched_edges": [
+    [
+     "GenerateQuery",
+     "Retrieve"
+    ],
+    [
+     "Retrieve",
+     "Respond"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "financial_research_agent",
+   "framework_detected": "openai-agents",
+   "gt_nodes": 6,
+   "pred_nodes": 6,
+   "matched_nodes": [
+    "Fundamentals",
+    "Planner",
+    "Risk",
+    "Search",
+    "Verifier",
+    "Writer"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 1.0,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 5,
+   "pred_edges": 6,
+   "matched_edges": [
+    [
+     "Planner",
+     "Search"
+    ],
+    [
+     "Search",
+     "Writer"
+    ],
+    [
+     "Writer",
+     "Fundamentals"
+    ],
+    [
+     "Writer",
+     "Risk"
+    ],
+    [
+     "Writer",
+     "Verifier"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 0.8333333333333334
+  },
+  {
+   "repo": "Agent-E",
+   "framework_detected": "autogen",
+   "gt_nodes": 3,
+   "pred_nodes": 4,
+   "matched_nodes": [
+    "BrowserNav",
+    "Human",
+    "Planner"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "browser_nav_executor"
+   ],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.75,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 4,
+   "pred_edges": 6,
+   "matched_edges": [
+    [
+     "Human",
+     "Planner"
+    ],
+    [
+     "Planner",
+     "Human"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "BrowserNav",
+     "Planner"
+    ],
+    [
+     "Planner",
+     "BrowserNav"
+    ]
+   ],
+   "edge_recall": 0.5,
+   "edge_precision": 0.5
+  },
+  {
+   "repo": "translation-agent",
+   "framework_detected": "custom",
+   "gt_nodes": 3,
+   "pred_nodes": 4,
+   "matched_nodes": [
+    "Improve",
+    "Reflect",
+    "Translate"
+   ],
+   "missed_nodes": [],
+   "duplicates": [],
+   "wrong": [
+    "patch"
+   ],
+   "code_real_extras": [],
+   "node_recall": 1.0,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.75,
+   "node_precision_lenient": 0.75,
+   "gt_edges": 2,
+   "pred_edges": 2,
+   "matched_edges": [
+    [
+     "Reflect",
+     "Improve"
+    ],
+    [
+     "Translate",
+     "Reflect"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [],
+   "edge_recall": 1.0,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "AlphaCodium",
+   "framework_detected": "custom",
+   "gt_nodes": 8,
+   "pred_nodes": 12,
+   "matched_nodes": [
+    "AITests",
+    "InitialCode",
+    "PossibleSolutions",
+    "RankSolutions",
+    "Reflection"
+   ],
+   "missed_nodes": [
+    "IterateAI",
+    "IteratePublic",
+    "PublicTestsReasoning"
+   ],
+   "duplicates": [],
+   "wrong": [
+    "generators"
+   ],
+   "code_real_extras": [
+    "run_analyze_and_fix_test_failure",
+    "run_analyze_test_failure",
+    "run_fix_code_from_tests_failure",
+    "run_validate_self_reflect",
+    "run_validate_ai_tests",
+    "run_baseline"
+   ],
+   "node_recall": 0.625,
+   "node_recall_code": 0.7142857142857143,
+   "node_precision_strict": 0.4166666666666667,
+   "node_precision_lenient": 0.9166666666666666,
+   "gt_edges": 7,
+   "pred_edges": 10,
+   "matched_edges": [
+    [
+     "AITests",
+     "InitialCode"
+    ],
+    [
+     "PossibleSolutions",
+     "RankSolutions"
+    ],
+    [
+     "PublicTestsReasoning",
+     "PossibleSolutions"
+    ],
+    [
+     "RankSolutions",
+     "AITests"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "InitialCode",
+     "IteratePublic"
+    ],
+    [
+     "IteratePublic",
+     "IterateAI"
+    ],
+    [
+     "Reflection",
+     "PublicTestsReasoning"
+    ]
+   ],
+   "edge_recall": 0.5714285714285714,
+   "edge_precision": 1.0
+  },
+  {
+   "repo": "WikiChat",
+   "framework_detected": "langgraph",
+   "gt_nodes": 8,
+   "pred_nodes": 8,
+   "matched_nodes": [
+    "Draft",
+    "ExtractClaims",
+    "Generate",
+    "Query",
+    "Refine",
+    "Retrieve",
+    "SummarizeFilter"
+   ],
+   "missed_nodes": [
+    "FactCheck"
+   ],
+   "duplicates": [],
+   "wrong": [],
+   "code_real_extras": [
+    "shift_references"
+   ],
+   "node_recall": 0.875,
+   "node_recall_code": 1.0,
+   "node_precision_strict": 0.875,
+   "node_precision_lenient": 1.0,
+   "gt_edges": 7,
+   "pred_edges": 7,
+   "matched_edges": [
+    [
+     "Draft",
+     "Refine"
+    ],
+    [
+     "Generate",
+     "ExtractClaims"
+    ],
+    [
+     "Query",
+     "Retrieve"
+    ],
+    [
+     "Retrieve",
+     "SummarizeFilter"
+    ],
+    [
+     "SummarizeFilter",
+     "Draft"
+    ]
+   ],
+   "matched_via_extra_step": [],
+   "missed_edges": [
+    [
+     "ExtractClaims",
+     "FactCheck"
+    ],
+    [
+     "FactCheck",
+     "Draft"
+    ]
+   ],
+   "edge_recall": 0.7142857142857143,
+   "edge_precision": 0.8333333333333334
+  }
+ ]
+}

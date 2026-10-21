@@ -19,4 +19,4 @@ Multi-Agents-Debate https://github.com/Skytliang/Multi-Agents-Debate e58d146
 Paper2Code https://github.com/going-doer/Paper2Code ba91699
 AgentCoder https://github.com/huangd1999/AgentCoder d8538d6
 LIST
-python3 "$here/score.py" "$work/out"
+python3 "$here/score.py" "$work/out" set1
