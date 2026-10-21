@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+- Five gaps found by a fifth check of ten projects against their README graphs (no rule names a project):
+  - notebooks are measured by their code, not their saved outputs, and `!pip install` / `%magic` lines no longer
+    stop a notebook from being read;
+  - agents built by factories: `name=` constants resolve to their value, an unnamed framework agent a factory returns
+    is named after it, and `managed_agents=team` follows the agents appended to `team`;
+  - hand-offs through functions given to an agent (`tools=`, `@agent.tool`, a helper that registers them, or
+    `agent.check = validate`) that run another agent directly or through a project helper;
+  - hierarchical CrewAI crews whose process and members are set in variables or built by a method
+    (`list(self.agents.values())`);
+  - a DSPy program whose `forward()` runs three or more of its own predictors with different signatures is drawn as
+    those steps.
+
 ### Added
 - Anything that calls an LLM is an agent system, with or without a framework, one agent or many:
   - the map: every function or class that calls a model is an agent; a shared helper that only forwards a prompt is

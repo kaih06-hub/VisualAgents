@@ -36,6 +36,8 @@ TOOL_CONFIGS = re.compile(
 )
 CONFIG_EXTS = {".yaml", ".yml", ".toml", ".json", ".md"}
 MAX_FILE_BYTES = 400_000
+# a notebook's saved outputs (images, tables) can make it megabytes: the limit applies to its code cells
+MAX_NOTEBOOK_BYTES = 30_000_000
 # Folders that keep an earlier implementation next to the current one (src/legacy/, old/, deprecated/): their agents
 # are not part of today's system, as long as there is code outside them.
 SUPERSEDED_DIRS = re.compile(r"^(legacy|deprecated|obsolete|old|_old|attic)$", re.I)
@@ -135,22 +137,36 @@ def _git_visible(root: Path) -> set[Path] | None:
 
 
 def _read(path: Path) -> str | None:
+    notebook = path.suffix == ".ipynb"
     try:
-        if path.stat().st_size > MAX_FILE_BYTES:
+        if path.stat().st_size > (MAX_NOTEBOOK_BYTES if notebook else MAX_FILE_BYTES):
             return None
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    if path.suffix == ".ipynb":
+    if notebook:
         try:
             nb = json.loads(raw)
             cells = [
-                "".join(c.get("source", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"
+                _plain_python("".join(c.get("source", []))) for c in nb.get("cells", []) if c.get("cell_type") == "code"
             ]
             raw = "\n\n# %% cell\n".join(cells)
         except (ValueError, AttributeError):
             return None
+        if len(raw.encode("utf-8")) > MAX_FILE_BYTES:
+            return None
     return raw
+
+
+_MAGIC = re.compile(r"^(\s*)([!%].*)$", re.M)
+
+
+def _plain_python(cell: str) -> str:
+    """A notebook cell as Python: IPython magics (`!pip install ...`, `%matplotlib inline`) become comments, and a
+    cell magic (`%%writefile`, `%%bash`) makes the whole cell text, not code."""
+    if cell.lstrip().startswith("%%"):
+        return "\n".join("# " + line for line in cell.splitlines())
+    return _MAGIC.sub(lambda m: f"{m.group(1)}# {m.group(2)}", cell)
 
 
 def iter_files(root: Path):

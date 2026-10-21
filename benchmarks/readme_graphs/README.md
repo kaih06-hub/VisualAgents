@@ -26,3 +26,6 @@ the READMEs before any scan. Sets 1-3 before/after the fixes it led to are in `r
 
 A fourth set of ten (`ground_truth_set4.py`, `run_set4.sh`, `score.py <out> set4`), also written before any scan, was
 used only to measure: main against dev-refinement, in `results-set4-2026-10-21.json`.
+
+A fifth set of ten (`ground_truth_set5.py`, `run_set5.sh`, `score.py <out> set5`) covers PydanticAI, Agno, DSPy and
+smolagents projects. Sets 1-5 before/after the fixes it led to are in `results-sets12345-2026-10-21.json`.

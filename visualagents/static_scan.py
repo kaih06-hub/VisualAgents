@@ -486,7 +486,7 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                     isinstance(n, ast.Call) and _call_name(n) in AGENT_FACTORIES | AGENT_CLASSES
                     for n in ast.walk(own)):
                 continue  # the project's own create_agent() that compiles its graph - not a wrapper of a factory
-            agent_name = _lit(_kw(node, "name", "agent_name"))
+            agent_name = _agent_name_kw(node, tree, c)
             role = _lit(_kw(node, *ROLE_KWARGS)) or ""
             if not agent_name and name == "Agent" and _kw(node, "role") is not None:
                 agent_name = role  # CrewAI: the role is the identity
@@ -495,6 +495,8 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 agent_name = _lit(node.args[0])
             if not agent_name and targets:
                 agent_name = targets[0]
+            if not agent_name and isinstance(parent, ast.Return) and name in AGENT_CLASSES:
+                agent_name = _enclosing_function(node, parents)  # return CodeAgent(...): the factory names it
             if not agent_name:
                 continue
             desc = next((v for v in (_lit(_kw(node, k)) for k in DESC_KWARGS) if v), "")
@@ -527,6 +529,8 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 if sub is None or (kw == "agents" and name not in {"AgentWorkflow"}):
                     continue
                 refs = _list_refs(sub)
+                if isinstance(sub, ast.Name):  # managed_agents=team, with team.append(CodeAgent(name=...)) above
+                    refs = _appended_agents(sub.id, node, parents, tree, c) or refs
                 if name in SEQUENTIAL_CLASSES and kw == "sub_agents":
                     for x, y in zip(refs, refs[1:]):
                         c.edges.append({"from": x, "to": y, "label": "", "conditional": False})
@@ -573,10 +577,13 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             continue
         if name == "Crew":
             c.vote("crewai", 2)
-            process = ast.get_source_segment(text, _kw(node, "process")) if _kw(node, "process") is not None else ""
+            proc = _kw(node, "process")
+            if isinstance(proc, ast.Name):  # process=process_type, set a few lines up
+                proc = _assigned_value(proc, node, parents, tree) or proc
+            process = ast.get_source_segment(text, proc) if proc is not None else ""
             mgr = _ref(_kw(node, "manager_agent"))
             if process and "hierarchical" in process:
-                members = _list_refs(_kw(node, "agents"))
+                members = _members(_kw(node, "agents"), node, parents, tree)
                 hub = mgr or "manager"
                 if not mgr:
                     c.add_agent("manager", file=src.rel, line=node.lineno, role="Crew manager (auto-created)")
@@ -584,6 +591,87 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                     c.edges.append({"from": hub, "to": m, "label": "delegates", "conditional": True})
                     c.edges.append({"from": m, "to": hub, "label": "reports", "conditional": True})
                 c.entry.append(hub)
+
+
+def _scope(node: ast.AST, parents: dict[ast.AST, ast.AST], kinds: tuple) -> ast.AST | None:
+    cur = parents.get(node)
+    while cur is not None and not isinstance(cur, kinds):
+        cur = parents.get(cur)
+    return cur
+
+
+def _assigned_value(target: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST) -> ast.AST | None:
+    """What a variable (in the enclosing function, else the module) or a self.attribute (in the enclosing class) was
+    last set to before `node`."""
+    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+        scope, want = _scope(node, parents, (ast.ClassDef,)), target.attr
+    elif isinstance(target, ast.Name):
+        scope, want = _scope(node, parents, (ast.FunctionDef, ast.AsyncFunctionDef)) or tree, target.id
+    else:
+        return None
+    found = None
+    for n in ast.walk(scope) if scope is not None else []:
+        if isinstance(n, ast.Assign) and any(_ref(t) == want and isinstance(t, type(target)) for t in n.targets):
+            if scope is not tree or getattr(n, "lineno", 0) <= getattr(node, "lineno", 0):
+                found = n.value
+    return found
+
+
+def _members(expr: ast.AST | None, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST,
+             depth: int = 0) -> list[str]:
+    """The agents a crew is given, however the list is built: [a, b], workers, list(self.agents.values()), or what a
+    builder method returns (agents = {}; agents["writer"] = Agent(...); return agents) - dict keys name the agents."""
+    if expr is None or depth > 4:
+        return []
+    if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+        return _list_refs(expr)
+    if isinstance(expr, ast.Dict):
+        return [r for k, v in zip(expr.keys, expr.values) for r in (_lit(k), _ref(v) if isinstance(v, ast.Name) else None)
+                if r]
+    if isinstance(expr, ast.Call):
+        f = expr.func
+        if isinstance(f, ast.Name) and f.id in ("list", "tuple", "set", "sorted") and expr.args:
+            return _members(expr.args[0], node, parents, tree, depth + 1)
+        if isinstance(f, ast.Attribute) and f.attr in ("values", "keys"):
+            return _members(f.value, node, parents, tree, depth + 1)
+        cls = _scope(node, parents, (ast.ClassDef,))
+        name = f.attr if isinstance(f, ast.Attribute) and _ref(f.value) == "self" else f.id if isinstance(f, ast.Name) else None
+        defs = [d for d in ast.walk(cls if isinstance(f, ast.Attribute) and cls is not None else tree)
+                if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)) and d.name == name] if name else []
+        for d in defs[:1]:  # a builder: what it returns
+            out: list[str] = []
+            for r in (n for n in ast.walk(d) if isinstance(n, ast.Return) and n.value is not None):
+                if isinstance(r.value, ast.Name):
+                    out += _built(r.value.id, d)
+                else:
+                    out += _members(r.value, r, parents, tree, depth + 1)
+            return list(dict.fromkeys(out))
+        return []
+    if isinstance(expr, (ast.Name, ast.Attribute)):
+        value = _assigned_value(expr, node, parents, tree)
+        if value is not None:
+            return _members(value, node, parents, tree, depth + 1)
+        fn = _scope(node, parents, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(expr, ast.Name) and fn is not None:
+            return _built(expr.id, fn)
+    return []
+
+
+def _built(var: str, fn: ast.AST) -> list[str]:
+    """Names a function puts into a dict or list it fills: var["writer"] = ..., var.append(writer), var = [a, b]."""
+    out: list[str] = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Subscript) and _ref(t.value) == var and isinstance(t.slice, ast.Constant):
+                    out.append(_lit(t.slice))
+                elif isinstance(t, ast.Name) and t.id == var and isinstance(n.value, (ast.List, ast.Tuple, ast.Dict)):
+                    out += _list_refs(n.value) if not isinstance(n.value, ast.Dict) else [
+                        _lit(k) for k in n.value.keys if k is not None and _lit(k)]
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "append" and \
+                _ref(n.func.value) == var and n.args and isinstance(n.args[0], ast.Name):
+            out.append(n.args[0].id)
+    return [o for o in dict.fromkeys(out) if o]
 
 
 def _loop_values(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[str]:
@@ -632,6 +720,46 @@ def _node_names(first: ast.AST | None, second: ast.AST | None, node: ast.AST, pa
     tail = first.value if isinstance(first, ast.Attribute) and first.attr == "value" else first
     r = _ref(tail)
     return [(r, action)] if r and r.isupper() else []
+
+
+def _agent_name_kw(call: ast.Call, tree: ast.AST, c: Any) -> str | None:
+    """name="writer", or name=WRITER_NAME with the constant defined in the module or elsewhere in the project."""
+    kw = _kw(call, "name", "agent_name")
+    lit = _lit(kw)
+    if lit or not isinstance(kw, (ast.Name, ast.Attribute)):
+        return lit
+    const = kw.id if isinstance(kw, ast.Name) else kw.attr
+    return _const_value(const, tree) or _project_const(const, c)
+
+
+def _project_const(name: str, c: Any) -> str | None:
+    """The string a module-level constant holds in exactly one of the project's files."""
+    found = {v for t in c.trees.values() for v in [_const_value(name, t)] if v}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _appended_agents(var: str, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST, c: Any) -> list[str]:
+    """The agents a function puts in a list it hands over: team = [a]; team.append(CodeAgent(name=...)); team += [b]."""
+    fn = parents.get(node)
+    while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+        fn = parents.get(fn)
+    if fn is None:
+        return []
+    items: list[ast.AST] = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("append", "extend") and \
+                isinstance(n.func.value, ast.Name) and n.func.value.id == var and n.args:
+            arg = n.args[0]
+            items += list(arg.elts) if n.func.attr == "extend" and isinstance(arg, (ast.List, ast.Tuple)) else [arg]
+        elif isinstance(n, (ast.Assign, ast.AugAssign)) and isinstance(n.value, (ast.List, ast.Tuple)) and any(
+                isinstance(t, ast.Name) and t.id == var for t in (n.targets if isinstance(n, ast.Assign) else [n.target])):
+            items += list(n.value.elts)
+    out = []
+    for it in sorted(items, key=lambda x: (getattr(x, "lineno", 0), getattr(x, "col_offset", 0))):
+        name = _agent_name_kw(it, tree, c) if isinstance(it, ast.Call) else _ref(it)
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 def _defined_function(name: str, node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
@@ -1042,6 +1170,52 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
             c.edges.append({"from": a, "to": b, "label": "", "conditional": False})
         if looped and len(set(order)) > 1:
             c.edges.append({"from": order[-1], "to": order[0], "label": "next round", "conditional": True})
+
+    for name in sorted(standalone):
+        _split_dspy_program(c, programs[name], name)
+
+
+def _split_dspy_program(c: _Collector, d: Any, name: str) -> None:
+    """A DSPy program whose forward() runs three or more predictors of its own with different signatures
+    (self.guard = dspy.Predict(InputGuard), self.answer = dspy.ChainOfThought(Answer), ...) is drawn as those steps, in
+    the order forward() runs them; hand-offs to the program start at its first step and leave from its last."""
+    preds: dict[str, tuple[str, str]] = {}  # attribute -> (predictor kind, signature)
+    for node in ast.walk(d.node):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and \
+                d.dspy_attr(node.value.func) in DSPY_PREDICTORS:
+            sig = node.value.args[0] if node.value.args else _kw(node.value, "signature")
+            for t in node.targets:
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self":
+                    preds[t.attr] = (d.dspy_attr(node.value.func), _ref(sig) or "")
+    fwd = next((m for m in d.node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and m.name in ("forward", "aforward", "__call__")), None)
+    if fwd is None or len({sig for _, sig in preds.values()}) < 3:
+        return
+    order: list[str] = []
+    for call in _calls_in_order(fwd):
+        f = call.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "self" and f.attr in preds \
+                and f.attr not in order:
+            order.append(f.attr)
+    if len({preds[a][1] for a in order}) < 3:
+        return
+    key = bpmod.norm_key(name)
+    old = c.agents.pop(key, None)
+    if old is None:
+        return
+    for i, attr in enumerate(order):
+        kind, sig = preds[attr]
+        c.add_agent(attr, file=d.rel, line=d.node.lineno, role=f"{kind} step of {name}",
+                    description=old["description"] if i == 0 else "",
+                    aliases=[a for a in (sig, f"{name}.{attr}", name if i == 0 else "") if a])
+    for a, b in zip(order, order[1:]):
+        c.edges.append({"from": a, "to": b, "label": "", "conditional": False})
+    olds = {key, *(bpmod.norm_key(a) for a in old["aliases"])}
+    for e in c.edges:
+        if bpmod.norm_key(e["from"]) in olds:
+            e["from"] = order[-1]
+        if bpmod.norm_key(e["to"]) in olds:
+            e["to"] = order[0]
 
 
 # a role's actions and the actions it watches for: roles hand work on by publishing what the next one watches
@@ -1628,6 +1802,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     _named_instances(files, c)
     _message_routes(files, c)
     run_order.link(c)
+    _tool_delegation(c)
 
     # no framework: every place that calls an LLM is an agent, even when there is only one
     if not c.agents:
@@ -1698,6 +1873,111 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     for a in raw["agents"]:
         a["keywords"] = _keywords_for(a)
     return bpmod.stamp(bpmod.normalize(raw), "static")
+
+
+_RUNS = {"run", "run_sync", "run_stream", "iter", "arun", "ainvoke", "invoke", "kickoff", "kickoff_async"}
+_TOOL_KWARGS = ("tools", "extra_tools", "functions", "toolsets")
+_ATTACH_DECORATORS = {"tool", "tool_plain", "output_validator", "result_validator"}
+
+
+def _tool_delegation(c: _Collector) -> None:
+    """Hand-offs through functions given to an agent - tools=[delegate_to_math], @supervisor.tool, a helper registering
+    them (register_tools(supervisor, [delegate_to_math])), or supervisor.check = validate - that run another agent
+    (math_agent.run(...), or a project helper that runs the agent it is passed)."""
+    owners: dict[str, str] = {}
+    for key, a in c.agents.items():
+        for n in (key, a["name"], *a["aliases"]):
+            k = bpmod.norm_key(n)
+            if k and k != "agent":
+                owners.setdefault(k, key)
+    if len(set(owners.values())) < 2:
+        return
+    defs: dict[str, list[ast.AST]] = {}  # function name -> definitions (module level and nested)
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs.setdefault(n.name, []).append(n)
+
+    def agent_of(e: ast.AST | None) -> str | None:
+        r = _ref(e) if isinstance(e, (ast.Name, ast.Attribute)) else None
+        return owners.get(bpmod.norm_key(r)) if r else None
+
+    def runs_params(fn: ast.AST) -> set[str]:
+        """Parameters this function runs: def run_agent(agent, ...): await agent.run(...)."""
+        params = {a.arg for a in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]}
+        return {n.func.value.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr in _RUNS and isinstance(n.func.value, ast.Name) and n.func.value.id in params}
+
+    def run_order(fn: ast.AST, depth: int = 0, seen: frozenset = frozenset()) -> list[str]:
+        out: list[str] = []
+        for call in _calls_in_order(fn):
+            ran: list[str] = []
+            f = call.func
+            if isinstance(f, ast.Attribute) and f.attr in _RUNS and agent_of(f.value):
+                ran = [agent_of(f.value)]
+            elif isinstance(f, ast.Attribute) and f.attr in _RUNS and _ref(f.value) == "Runner" and call.args:
+                ran = [a for a in [agent_of(call.args[0])] if a]
+            elif isinstance(f, ast.Name):  # a function of the project (asyncio.run(...) is not)
+                for d in defs.get(f.id, [])[:3]:
+                    if id(d) in seen or depth >= 3:
+                        continue
+                    params = [a.arg for a in [*d.args.posonlyargs, *d.args.args]]
+                    run_p = runs_params(d)
+                    given = {params[i]: a for i, a in enumerate(call.args) if i < len(params)}
+                    given.update({k.arg: k.value for k in call.keywords if k.arg})
+                    ran += [a for p, e in given.items() if p in run_p for a in [agent_of(e)] if a]
+                    ran += run_order(d, depth + 1, seen | {id(d)})
+            out += [a for a in ran if a not in out]
+        return out
+
+    handed: list[tuple[str, ast.AST]] = []  # (agent key, function handed to it)
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for d in n.decorator_list:  # @supervisor.tool / @supervisor.tool_plain(...)
+                    d = d.func if isinstance(d, ast.Call) else d
+                    if isinstance(d, ast.Attribute) and d.attr in _ATTACH_DECORATORS and agent_of(d.value):
+                        handed.append((agent_of(d.value), n))
+            elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Name):  # supervisor.check = validate
+                for t in n.targets:
+                    if isinstance(t, ast.Attribute) and agent_of(t.value):
+                        handed += [(agent_of(t.value), d) for d in defs.get(n.value.id, [])]
+            elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):  # x = make_agent(tools=[delegate])
+                owner = next((agent_of(t) for t in n.targets if agent_of(t)), None)
+                for kw in n.value.keywords:
+                    if owner and kw.arg in _TOOL_KWARGS:
+                        handed += [(owner, d) for r in _list_refs(kw.value) for d in defs.get(r, [])]
+            elif isinstance(n, ast.Call):  # register_tools(supervisor, [delegate_to_math, ...])
+                givers = {agent_of(a) for a in n.args} - {None}
+                if len(givers) == 1:
+                    for a in [*n.args, *(k.value for k in n.keywords)]:
+                        if isinstance(a, (ast.List, ast.Tuple)):
+                            handed += [(next(iter(givers)), d) for r in _list_refs(a) for d in defs.get(r, [])]
+    seen_edges = {(bpmod.norm_key(e["from"]), bpmod.norm_key(e["to"])) for e in c.edges}
+
+    def add(a: str, b: str, label: str) -> None:
+        pair = (bpmod.norm_key(c.agents[a]["name"]), bpmod.norm_key(c.agents[b]["name"]))
+        if a != b and pair not in seen_edges:
+            seen_edges.add(pair)
+            c.edges.append({"from": c.agents[a]["name"], "to": c.agents[b]["name"], "label": label, "conditional": True})
+
+    for owner, fn in handed:  # what runs after what inside them is branchy (retry this or that): left to run order
+        for b in run_order(fn):
+            add(owner, b, "delegates")
+
+
+def _calls_in_order(node: ast.AST):
+    """Calls in the order they run: statement by statement, a call's arguments before the call itself (nested
+    definitions are not run here)."""
+    for child in ast.iter_child_nodes(node):
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            yield from _calls_in_order(child)
+    if isinstance(node, ast.Call):
+        yield node
 
 
 def _split_pipeline_classes(c: _Collector, files: list[SourceFile]) -> None:

@@ -1,0 +1,108 @@
+"""Fifth held-out set: ten more agent projects whose READMEs draw their agent graph.
+
+Written from each README's diagram before any project was scanned (same format as GT .. GT4). `real_extra` names
+components that exist in today's code but are not drawn, decided from the code, never from scan output.
+"""
+
+GT5 = {
+    "pydantic-supervisor": {
+        "url": "https://github.com/cjgalione/pydantic-supervisor", "sha": "a62c7a4",
+        "framework": "pydantic-ai",
+        "source": "README mermaid flowchart (the 'corrective action' step returns to the supervisor)",
+        "nodes": {"Supervisor": r"supervisor", "Research": r"research", "Math": r"math", "Critic": r"critic"},
+        "edges": [("Supervisor", "Research"), ("Supervisor", "Math"), ("Research", "Math"), ("Math", "Research"),
+                  ("Supervisor", "Critic"), ("Critic", "Supervisor")],
+        "real_extra": r"deep_?agent",  # the agent-building module the supervisor lives in
+    },
+    "Financial_AI_Agent": {
+        "url": "https://github.com/malikdeepak09/Financial_AI_Agent", "sha": "5be6550",
+        "framework": "agno",
+        "source": "README mermaid flowchart",
+        "nodes": {"Coordinator": r"coordinator|process_query|main_ai", "WebSearch": r"^web(_search)?(_agent)?$",
+                  "FinanceAnalysis": r"financ(e|ial)_?(analys(t|is))?(_agent)?$|^analysis_agent$",
+                  "ResponseProcessor": r"response_?processor"},
+        "edges": [("Coordinator", "WebSearch"), ("Coordinator", "FinanceAnalysis"), ("WebSearch", "Coordinator"),
+                  ("FinanceAnalysis", "Coordinator"), ("Coordinator", "ResponseProcessor")],
+        "real_extra": r"$^",
+    },
+    "veritascribe": {
+        "url": "https://github.com/legout/veritascribe", "sha": "bc5ddd1",
+        "framework": "dspy",
+        "source": "README mermaid graph (the pipeline's processing components)",
+        "nodes": {"PDFProcessor": r"pdf_?processor", "Orchestrator": r"orchestrator",
+                  "Linguistic": r"linguistic", "Content": r"content_?validat", "Citation": r"citation",
+                  "ReportGenerator": r"report_?generator"},
+        "edges": [("PDFProcessor", "Orchestrator"), ("Orchestrator", "Linguistic"), ("Orchestrator", "Content"),
+                  ("Orchestrator", "Citation")],
+        "real_extra": r"$^",
+    },
+    "medirag": {
+        "url": "https://github.com/alvinhenrick/medirag", "sha": "99b08f7",
+        "framework": "dspy",
+        "source": "README mermaid flowchart, runtime part",
+        "nodes": {"InputGuardrail": r"input_?guard", "Retrieval": r"retriev|hybrid",
+                  "GenerateAnswer": r"generate_?answer|chain_?of_?thought|dspy_?rag",
+                  "OutputGuardrail": r"output_?guard"},
+        "edges": [("InputGuardrail", "Retrieval"), ("Retrieval", "GenerateAnswer"),
+                  ("GenerateAnswer", "OutputGuardrail")],
+        "real_extra": r"$^",
+    },
+    "ResearchMind": {
+        "url": "https://github.com/Agamjot27/ResearchMind", "sha": "b96bae1",
+        "framework": "langgraph",
+        "source": "README mermaid flowchart",
+        "nodes": {"Search": r"^search", "Reader": r"^reader", "Writer": r"^writer", "Critic": r"^critic",
+                  "Rewriter": r"^rewriter"},
+        "edges": [("Search", "Reader"), ("Reader", "Writer"), ("Writer", "Critic"), ("Critic", "Rewriter")],
+        "real_extra": r"$^",
+    },
+    "InsightGraph": {
+        "url": "https://github.com/Caser-86/InsightGraph", "sha": "5f862b8",
+        "framework": "langgraph",
+        "source": "README mermaid flowchart (agent boxes; the scoring box is a step between collector and analyst)",
+        "nodes": {"Planner": r"^plan", "Collector": r"collect", "Analyst": r"analy", "Critic": r"critic|critique",
+                  "Reporter": r"report"},
+        "edges": [("Planner", "Collector"), ("Collector", "Analyst"), ("Analyst", "Critic"), ("Critic", "Planner"),
+                  ("Critic", "Reporter")],
+        "real_extra": r"record_retry",
+    },
+    "Financial-Document-Analyzer": {
+        "url": "https://github.com/AdityaMedidala/Financial-Document-Analyzer", "sha": "47580c6",
+        "framework": "crewai",
+        "source": "README mermaid flowchart, CrewAI pipeline part",
+        "nodes": {"Analyst": r"financial_analyst|senior_financial_analyst", "Advisor": r"investment_(advisor|analyst)",
+                  "Risk": r"risk", "Verifier": r"verifier"},
+        "edges": [("Analyst", "Advisor"), ("Advisor", "Risk"), ("Risk", "Verifier")],
+        "real_extra": r"$^",
+    },
+    "sales-team-ai-agents": {
+        "url": "https://github.com/Getting-Automated/sales-team-ai-agents", "sha": "f3b110c",
+        "framework": "crewai",
+        "source": "README mermaid graph (agents; the tools subgraph left out)",
+        "nodes": {"SalesManager": r"^manager$|sales_(process_)?manager", "DataManager": r"data_(operations_)?manager",
+                  "DataEnricher": r"data_enrich", "CompanyEvaluator": r"company_evaluator",
+                  "IndividualEvaluator": r"individual_(lead_)?evaluator", "PainPoint": r"pain_point",
+                  "EmailCampaign": r"email_campaign", "OfferCreator": r"offer"},
+        "edges": [("SalesManager", x) for x in ("DataManager", "DataEnricher", "CompanyEvaluator",
+                                                 "IndividualEvaluator", "PainPoint", "EmailCampaign", "OfferCreator")],
+        "real_extra": r"$^",
+    },
+    "ai-research-assistant-crewai": {
+        "url": "https://github.com/nabankur14/ai-research-assistant-crewai", "sha": "3c9f035",
+        "framework": "crewai",
+        "source": "README mermaid flowchart",
+        "nodes": {"Analyst": r"research_(agent|analyst)", "Writer": r"writer|academic_writer",
+                  "Reviewer": r"reviewer|peer_reviewer"},
+        "edges": [("Analyst", "Writer"), ("Writer", "Reviewer")],
+        "real_extra": r"$^",
+    },
+    "gaia-agent": {
+        "url": "https://github.com/bakulbadwal/gaia-agent", "sha": "39f222b",
+        "framework": "smolagents",
+        "source": "README mermaid flowchart: one CodeAgent and an optional verifier (tools are not agents)",
+        "nodes": {"CodeAgent": r"code_?agent|^(gaia_?)?agent$|build_\w*agent|manager|solver",
+                  "Verifier": r"verif"},
+        "edges": [("CodeAgent", "Verifier")],
+        "real_extra": r"web|media",  # the web / media specialists of the multi-agent mode
+    },
+}
