@@ -17,6 +17,9 @@
   needs billing on the key (a free key has no Pro quota).
 
 ### Fixed
+- Cloning from the guided start: answering `y` / `yes` at "Clone it into [~/agents/…]" clones into the
+  suggested folder instead of one called `y` (`n` / `no` cancels), and an existing folder is reused only when it
+  is a clone of the same repository - not a clone of something else that happens to have that name.
 - Start-command detection reads a project's console scripts on Python 3.10 too (no `tomllib` there).
 - Start-command detection: a project's own console scripts in its README count as start commands, an interactive
   chat command is preferred over a server or a web front end in a subfolder, and they run from the project's

@@ -96,11 +96,21 @@ def _resolve_project(raw: str) -> Path | None:
 def _clone(url: str) -> Path | None:
     name = re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1].split(":")[-1]) or "project"
     default = os.path.join("~", "agents", name)
-    dest = Path(tui.clean_path(tui.ask("Clone it into", default, paths=True)))
+    answer = tui.ask("Clone it into", default, paths=True).strip()
+    if answer.lower() in ("y", "yes"):  # "yes, clone it" - not a folder called y
+        answer = default
+    elif answer.lower() in ("n", "no"):
+        return None
+    dest = Path(tui.clean_path(answer or default))
     if dest.exists() and any(dest.iterdir()):
         if (dest / ".git").exists():
-            tui.ok(f"Using the existing clone in {tui.short(str(dest))}")
-            return dest
+            origin = _origin(dest)
+            if origin and _same_repo(origin, url):
+                tui.ok(f"Using the existing clone in {tui.short(str(dest))}")
+                return dest
+            tui.warn(f"{tui.short(str(dest))} is a clone of {origin or 'another repository'}, not {url} - "
+                     "pick another folder")
+            return None
         tui.warn(f"{tui.short(str(dest))} already exists and isn't empty")
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +121,25 @@ def _clone(url: str) -> Path | None:
         return None
     tui.ok(f"Cloned into {tui.short(str(dest))}")
     return dest
+
+
+def _origin(repo: Path) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True, text=True)
+    except OSError:
+        return None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def _same_repo(a: str, b: str) -> bool:
+    """https://github.com/o/r.git, git@github.com:o/r and ssh://git@github.com/o/r are the same repository."""
+    def key(url: str) -> str:
+        url = re.sub(r"^[a-z+]+://", "", url.strip().lower())  # https://, ssh://, git://
+        url = re.sub(r"^[^@/]+@", "", url)  # git@ or user:token@
+        url = re.sub(r"^([^/:]+):\d+/", r"\1/", url)  # host:443/owner/repo
+        url = url.replace(":", "/", 1) if "/" not in url.split(":", 1)[0] else url  # host:owner/repo
+        return re.sub(r"(\.git)?/*$", "", url)
+    return key(a) == key(b)
 
 
 def _looks_like_project(path: Path) -> bool:
