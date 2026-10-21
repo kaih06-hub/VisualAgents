@@ -18,7 +18,7 @@ from typing import Any
 
 from . import blueprint as bpmod
 from . import call_sites
-from .collector import TEST_PATH, SourceFile, collect
+from .collector import SKIP_DIRS, SourceFile, collect, is_test_file
 
 AGENT_CLASSES = {
     "Agent", "AssistantAgent", "UserProxyAgent", "ConversableAgent", "CodeExecutorAgent",
@@ -91,6 +91,14 @@ class _Collector:
         self.trees: dict[str, ast.Module] = {}  # file -> its parsed Python, parsed once
         self.project_frameworks: set[str] = set()  # frameworks any file of the project imports
         self.agent_classes: set[str] = set()  # names of the classes found to be agents or agent programs
+        self.test_files: set[str] = set()  # the project's tests: they restate agents with stubs and fixtures
+        self.node_keys: dict[str, set[str]] = {}  # graph node -> names its action is built from ("coder_agent")
+        self.builder_ends: dict[str, tuple[list[str], list[str]]] = {}  # graph builder -> (entry nodes, exit nodes)
+        self.compiled: dict[str, str] = {}  # variable -> the graph builder it holds compiled: sub = builder.compile()
+        self.subgraphs: list[tuple[str, str]] = []  # (node, builder) for a node that runs a whole compiled graph
+        self.on_their_own: set[str] = set()  # model callers with no known caller: each its own start and end
+        self.unused_classes: list[dict[str, str]] = []  # agent classes nothing in the project creates or names
+        self.class_defs: tuple[list[Any], set[str]] | None = None  # every class of the project, parsed once
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -312,6 +320,9 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if langgraph and _call_name(node.value) == "compile" and isinstance(node.value.func, ast.Attribute):
+                for t in _assigned_names(node):
+                    c.compiled[t] = _ref(node.value.func.value) or ""
             cls_name = _call_name(node.value)
             if cls_name and cls_name[:1].isupper():
                 for t in node.targets:
@@ -357,6 +368,14 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
         name = _call_name(node)
         parent = parents.get(node)
         targets = _assigned_names(parent) if parent is not None else []
+        if langgraph and name in ("add_edge", "set_entry_point", "set_finish_point") and \
+                isinstance(node.func, ast.Attribute) and node.args:
+            ends = c.builder_ends.setdefault(_ref(node.func.value) or "", ([], []))
+            first, last = _ref(node.args[0]), _ref(node.args[-1])
+            if name == "set_entry_point" or (name == "add_edge" and first in START_NAMES):
+                ends[0].append(last or "")
+            if name == "set_finish_point" or (name == "add_edge" and last in END_NAMES and len(node.args) > 1):
+                ends[1].append(first or "")
         if name in GRAPH_CALLS and not langgraph and (other_graph or name == "Command" or not node.args or not all(
                 _lit(a) for a in node.args[:1 if name in ("add_node", "add_conditional_edges") else 2])):
             continue
@@ -376,6 +395,17 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             c.graph_nodes[node_name] = ag
             if fn_name:
                 c.node_funcs[fn_name] = node_name
+            # an agent built for the node by a wrapper: add_node("coder", wrap(agents["coder_agent"], "coder_agent"))
+            if isinstance(second, (ast.Call, ast.Subscript)):
+                c.node_keys.setdefault(node_name, set()).update(
+                    v for v in (_lit(n) for n in ast.walk(second) if isinstance(n, ast.Constant)) if v and v.isidentifier())
+            sub = None  # add_node("write", writing_graph.compile()) / add_node("write", compiled_writer)
+            if isinstance(second, ast.Call) and isinstance(second.func, ast.Attribute) and second.func.attr == "compile":
+                sub = _ref(second.func.value)
+            elif isinstance(second, ast.Name):
+                sub = c.compiled.get(second.id)
+            if sub:
+                c.subgraphs.append((node_name, sub))
             continue
         if name == "add_edge" and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
             srcs = _loop_values(node.args[0], node, parents) or (
@@ -718,7 +748,7 @@ def _class_defs(files: list[SourceFile], trees: dict[str, ast.Module]) -> tuple[
     out, called = [], set()
     for f in files:
         tree = trees.get(f.rel)
-        if tree is None or TEST_PATH.search(f.rel.replace(os.sep, "/")):
+        if tree is None or is_test_file(f.rel, f.text):
             continue
         mods, names = set(), {}
         for node in ast.walk(tree):
@@ -733,6 +763,12 @@ def _class_defs(files: list[SourceFile], trees: dict[str, ast.Module]) -> tuple[
     return out, called
 
 
+def _cached_defs(files: list[SourceFile], c: _Collector) -> tuple[list[_ClassDef], set[str]]:
+    if c.class_defs is None:
+        c.class_defs = _class_defs(files, c.trees)
+    return c.class_defs
+
+
 def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
     """Agents a project defines as classes rather than builds from a framework's constructors: subclasses of an
     agent base (Reviewer(Agent), through the project's own classes too) and DSPy programs - dspy.Module
@@ -740,7 +776,7 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
     agent's tool; a module that calls programs in turn (a writer asking an expert, round after round) is how work
     flows between them. A program nothing in the project creates is not part of a run; the others say which
     classes create them, so the model can tell a pipeline step from a part of something bigger."""
-    defs, called = _class_defs(files, c.trees)
+    defs, called = _cached_defs(files, c)
     by_name: dict[str, list[_ClassDef]] = {}
     for d in defs:
         by_name.setdefault(d.name, []).append(d)
@@ -766,6 +802,21 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
         return last in AGENT_CLASSES or (last in by_name and bool(OWN_AGENT_BASE.search(last)))
 
     agent_classes = [d for d in defs if not abstract(d) and inherits(d, agent_base)]
+    # Fact: agent classes the project defines but never creates, names or subclasses (roles only re-exported by an
+    # __init__, an earlier design kept in the tree) - most likely not part of a run, when other agent classes are
+    used = {n.id if isinstance(n, ast.Name) else n.attr for rel, tree in c.trees.items() if rel not in c.test_files
+            for n in ast.walk(tree) if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load)}
+    if any(d.name in used for d in agent_classes):
+        # ...and that nothing names in text either: a class loaded by its module or folder name from configuration
+        # ("roles: [planner, code_interpreter]") is used
+        words = {w.lower() for f in files if f.rel not in c.test_files and f.path.suffix.lower() not in (".py", ".ipynb")
+                 for w in re.findall(r"\w+", f.text)}
+        words |= {w.lower() for rel, tree in c.trees.items() if rel not in c.test_files for n in ast.walk(tree)
+                  if isinstance(n, ast.Constant) and isinstance(n.value, str) for w in re.findall(r"\w+", n.value)}
+        for d in agent_classes:
+            path = _posix(d.rel)
+            if d.name not in used and not {d.name.lower(), path.stem.lower(), path.parent.name.lower()} & words:
+                c.unused_classes.append({"class": d.name, "file": d.rel})
     modules = [d for d in defs if inherits(d, is_module)]
     programs = {d.name: d for d in modules if any(d.dspy_attr(n.func) in DSPY_PREDICTORS for n in d.calls())}
 
@@ -845,6 +896,334 @@ def _scan_classes(files: list[SourceFile], c: _Collector) -> None:
             c.edges.append({"from": a, "to": b, "label": "", "conditional": False})
         if looped and len(set(order)) > 1:
             c.edges.append({"from": order[-1], "to": order[0], "label": "next round", "conditional": True})
+
+
+# a role's actions and the actions it watches for: roles hand work on by publishing what the next one watches
+ACTION_SETTERS = ("_init_actions", "set_actions", "init_actions", "_set_actions")
+WATCHERS = ("_watch", "watch", "subscribe", "_subscribe")
+
+
+def _message_routes(files: list[SourceFile], c: _Collector) -> None:
+    """Publish/subscribe teams: a role class declares the actions it runs (self.set_actions([WriteSpec])) and the
+    actions it reacts to (self._watch([WriteSpec])). A role whose action another watches hands work to it; a role
+    watching something no role produces (the user's requirement) is where a run starts."""
+    defs, _ = _cached_defs(files, c)
+    by_class: dict[str, str] = {}
+    for key, a in c.agents.items():
+        for n in [a["name"], *a["aliases"]]:
+            by_class.setdefault(n, key)
+    outs: dict[str, set[str]] = {}
+    watches: dict[str, set[str]] = {}
+    for d in defs:
+        if d.name not in by_class:
+            continue
+        for call in d.calls():
+            f = call.func
+            if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "self"
+                    and call.args):
+                continue
+            names = {r for r in _list_refs(call.args[0]) if r[:1].isupper()} \
+                if isinstance(call.args[0], (ast.List, ast.Tuple)) else set()
+            if f.attr in ACTION_SETTERS:
+                outs.setdefault(d.name, set()).update(names)
+            elif f.attr in WATCHERS:
+                watches.setdefault(d.name, set()).update(names)
+    produced = set().union(*outs.values()) if outs else set()
+    for b, watched in watches.items():
+        senders = [a for a, made in outs.items() if a != b and made & watched]
+        for a in senders:
+            c.edges.append({"from": c.agents[by_class[a]]["name"], "to": c.agents[by_class[b]]["name"],
+                            "label": ", ".join(sorted(outs[a] & watched)), "conditional": False})
+        if watched and not watched & produced:
+            c.entry.append(c.agents[by_class[b]]["name"])
+
+
+def _link_subgraphs(c: _Collector) -> None:
+    """A node that runs a whole compiled graph hands work to that graph's entry nodes and gets it back from its exit
+    nodes; the inner graph's own start and end are not where a run starts or ends."""
+    for node, builder in c.subgraphs:
+        entries, exits = c.builder_ends.get(builder, ([], []))
+        for e in dict.fromkeys(entries):
+            c.edges.append({"from": node, "to": e, "label": "runs", "conditional": False})
+        for x in dict.fromkeys(exits):
+            c.edges.append({"from": x, "to": node, "label": "returns", "conditional": False})
+        c.entry = [e for e in c.entry if e not in entries]
+        c.exits = [x for x in c.exits if x not in exits]
+
+
+def _declared_names(d: _ClassDef) -> list[str]:
+    """Names a class gives its agent: super().__init__(agent_name="coder_agent"), name = "coder"."""
+    out = []
+    for node in d.node.body:
+        if isinstance(node, ast.Assign) and _lit(node.value) and any(
+                isinstance(t, ast.Name) and t.id in ("name", "agent_name", "role_name") for t in node.targets):
+            out.append(_lit(node.value))
+    for call in d.calls():
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "__init__":
+            v = _lit(_kw(call, "agent_name", "name", "role_name"))
+            if v:
+                out.append(v)
+    return [n for n in out if n]
+
+
+def _fold_into_nodes(c: _Collector, files: list[SourceFile]) -> None:
+    """A graph node whose action wraps an agent by name - add_node("Coder", wrap(agents["coder_agent"])) with
+    CoderAgent declaring agent_name="coder_agent" - is that agent: one block on the map, not two."""
+    if not c.node_keys:
+        return
+    declared: dict[str, list[str]] = {}
+    for d in _cached_defs(files, c)[0]:
+        declared.setdefault(d.name, []).extend(_declared_names(d))
+    owner: dict[str, str] = {}
+    for node_name, keys in c.node_keys.items():
+        for k in keys:
+            owner.setdefault(bpmod.norm_key(k), node_name)
+    graph = {id(a) for a in c.graph_nodes.values()}
+    for key, agent in list(c.agents.items()):
+        if id(agent) in graph:
+            continue
+        names = [agent["name"], *agent["aliases"]]
+        names += [n for a in names for n in declared.get(a, [])]
+        node_name = next((owner[bpmod.norm_key(n)] for n in names if bpmod.norm_key(n) in owner), None)
+        if node_name is None:
+            continue
+        node_agent = c.graph_nodes[node_name]
+        node_agent["role"] = node_agent["role"] or agent["role"]
+        node_agent["description"] = node_agent["description"] or agent["description"]
+        node_agent["tools"] += [t for t in agent["tools"] if t not in node_agent["tools"]]
+        node_agent["aliases"] += [a for a in agent["aliases"] if a not in node_agent["aliases"]]
+        del c.agents[key]
+
+
+_SHELL_PY = re.compile(r"\bpython[\d.]*\s+(?:-[A-Za-z]+\s+)*(-m\s+[\w.]+|[^\s;|&]+?\.py)\b")
+
+
+def _shell_scripts(root: Path, limit: int = 40) -> list[tuple[str, str]]:
+    """(rel path, text) of the project's shell scripts: run.sh, scripts/train.sh ..."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+        for name in sorted(filenames):
+            if name.endswith((".sh", ".bash")):
+                p = Path(dirpath) / name
+                try:
+                    if p.stat().st_size < 200_000:
+                        out.append((p.relative_to(root).as_posix(), p.read_text(errors="replace")))
+                except OSError:
+                    continue
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _script_pipelines(c: _Collector, files: list[SourceFile]) -> list[dict[str, Any]]:
+    """Shell scripts that run the project's Python scripts one after another (python plan.py; python write.py) are
+    a pipeline: each script's agents hand their output to the next script's. A step that calls no model is still a
+    step of the run. Returns the pipelines as facts."""
+    if not c.root.is_dir():
+        return []
+    stems: dict[str, list[str]] = {}
+    for f in files:
+        if f.path.suffix == ".py" and f.rel not in c.test_files:
+            stems.setdefault(PurePosixPath(_posix(f.rel)).stem, []).append(f.rel)
+
+    def resolve(token: str) -> tuple[str, list[str]]:
+        if token.startswith("-m"):
+            stem = token.split()[-1].split(".")[-1]
+        else:  # programmer_[humaneval/mbpp].py, solver_{a,b}.py: a pattern over variants
+            stem = PurePosixPath(re.sub(r"\[[^\]]*\]|\{[^}]*\}", "*", token)).stem
+        if stem in stems:
+            return stem, stems[stem]
+        prefix = re.split(r"[\[{*?]", stem, maxsplit=1)[0]
+        if prefix != stem and len(prefix) >= 3:  # python solver_[math/code].py: each variant
+            hits = [r for st, rels in stems.items() if st.startswith(prefix) for r in rels]
+            return prefix.strip("_-"), hits
+        return stem, []
+
+    def agents_in(rels: list[str], step: str) -> list[str]:
+        out = []
+        for key, a in c.agents.items():
+            if a.get("file") in rels or step in a["aliases"]:
+                out.append(key)
+        return out
+
+    pipelines, seen = [], set()
+    for rel, text in _shell_scripts(c.root):
+        text = re.sub(r"\\\n", " ", text)
+        steps: list[tuple[str, list[str]]] = []
+        for line in text.splitlines():
+            line = line.split("#", 1)[0]
+            for m in _SHELL_PY.finditer(line):
+                name, hits = resolve(m.group(1))
+                if hits and (not steps or steps[-1][0] != name):
+                    steps.append((name, hits))
+        with_agents = [s for s in steps if agents_in(s[1], s[0])]
+        if len(steps) < 2 or len(with_agents) < 2:
+            continue
+        order = tuple(n for n, _ in steps)
+        if order in seen:
+            continue
+        seen.add(order)
+        pipelines.append({"script": rel, "runs": list(order)})
+        keys: list[list[str]] = []
+        for name, hits in steps:
+            ks = agents_in(hits, name)
+            if not ks:  # a step that runs no model (pre-processing, a test runner) is still part of the run
+                ag = c.add_agent(name, file=hits[0], line=1, role="pipeline step (calls no model itself)")
+                ks = [bpmod.norm_key(name)]
+                _calls_into(c, hits, ag)
+            keys.append(ks)
+        for a, b in zip(keys, keys[1:]):
+            c.edges.append({"from": c.agents[a[-1]]["name"], "to": c.agents[b[0]]["name"], "label": "then",
+                            "conditional": False})
+        c.entry.append(c.agents[keys[0][0]]["name"])
+        c.exits.append(c.agents[keys[-1][-1]]["name"])
+    return pipelines
+
+
+def _calls_into(c: _Collector, rels: list[str], step: dict[str, Any]) -> None:
+    """A step script that imports code from an agent's script and calls it hands work back to that agent (a test
+    runner sending failures to the programmer's fix-up)."""
+    by_stem: dict[str, str] = {}
+    for key, ag in c.agents.items():
+        if ag is not step:
+            for n in [PurePosixPath(_posix(ag.get("file") or "x")).stem, *ag["aliases"]]:
+                by_stem.setdefault(n, key)
+    for rel in rels:
+        tree = c.trees.get(rel)
+        if tree is None:
+            continue
+        source = {a.asname or a.name: (n.module or "").split(".")[-1]
+                  for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
+        for name in dict.fromkeys(_call_name(n) for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            key = by_stem.get(source.get(name, ""))
+            if key:
+                c.edges.append({"from": step["name"], "to": c.agents[key]["name"], "label": "calls",
+                                "conditional": False})
+
+
+NAME_KWARGS = ("name", "agent_name", "role_name", "role")
+
+
+def _str_list(node: ast.AST | None) -> list[str]:
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts and all(_lit(e) for e in node.elts):
+        return [_lit(e) for e in node.elts]  # type: ignore[misc]
+    return []
+
+
+def _named_instances(files: list[SourceFile], c: _Collector) -> None:
+    """One agent class played by several named instances - Player(name="Affirmative"), Player(name="Negative"), or
+    [Player(name=n) for n in ROLES] - is several agents: each instance is one, and the order the code asks them in
+    (a.ask(); b.ask(); judge.ask() inside a loop) is how work passes between them."""
+    defs, _ = _cached_defs(files, c)
+    bases = {d.name: [b.split(".")[-1] for b in d.bases] for d in defs}
+    asking = call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files])
+
+    def methods(cls: str, seen: frozenset = frozenset()) -> set[str]:
+        out = set(asking.get(cls, ()))
+        for b in bases.get(cls, ()):
+            if b not in seen:
+                out |= methods(b, seen | {cls})
+        return out
+
+    classes = {name for name in bases if methods(name)}  # the project's classes that talk to a model
+    if not classes:
+        return
+    consts: dict[str, list[str]] = {}  # NAMES = ["Affirmative side", "Negative side", "Moderator"]
+    for tree in c.trees.values():
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and _str_list(node.value):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        consts[t.id] = _str_list(node.value)
+
+    found: dict[str, dict[str, Any]] = {}  # instance name -> {"cls", "file", "line", "aliases"}
+    lists: dict[str, list[str]] = {}  # self.players -> its instance names, in order
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        parents = {ch: n for n in ast.walk(tree) for ch in ast.iter_child_nodes(n)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and _call_name(node) in classes):
+                continue
+            cls, kw = _call_name(node), _kw(node, *NAME_KWARGS)
+            names, holder = [], parents.get(node)
+            if _lit(kw):
+                names = [_lit(kw)]
+            elif isinstance(kw, ast.Name) and isinstance(holder, (ast.ListComp, ast.GeneratorExp)):
+                gen = next((g for g in holder.generators if isinstance(g.target, ast.Name) and g.target.id == kw.id), None)
+                if gen is not None:
+                    names = _str_list(gen.iter) or consts.get(getattr(gen.iter, "id", ""), [])
+                holder = parents.get(holder)
+            if not names:
+                continue
+            targets = _assigned_names(holder) if holder is not None else []
+            for n in names:
+                rec = found.setdefault(n, {"cls": cls, "file": rel, "line": node.lineno, "aliases": []})
+                if len(names) == 1:
+                    rec["aliases"] += [t for t in targets if t not in rec["aliases"]]
+            if len(names) > 1:
+                for t in targets:
+                    lists[t] = names
+    if len(found) < 2:
+        return
+    for tree in c.trees.values():  # self.affirmative = self.players[0]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript):
+                src, idx = _ref(node.value.value), node.value.slice
+                if src in lists and isinstance(idx, ast.Constant) and isinstance(idx.value, int) \
+                        and -len(lists[src]) <= idx.value < len(lists[src]):
+                    rec = found[lists[src][idx.value]]
+                    rec["aliases"] += [a for a in _assigned_names(node) if a not in rec["aliases"]]
+
+    owners: dict[str, list[str]] = {}
+    for n, rec in found.items():
+        for a in dict.fromkeys(rec["aliases"]):
+            owners.setdefault(a, []).append(n)
+    alias = {a: ns[0] for a, ns in owners.items() if len(ns) == 1}
+    for cls in {rec["cls"] for rec in found.values()}:  # the class is its instances now
+        key = bpmod.norm_key(cls)
+        if key in c.agents and cls in c.agents[key]["aliases"] + [c.agents[key]["name"]]:
+            del c.agents[key]
+    for n, rec in found.items():
+        c.add_agent(n, file=rec["file"], line=rec["line"], role=f"a {rec['cls']}",
+                    aliases=[a for a in rec["aliases"] if alias.get(a) == n])
+
+    def who(call: ast.Call) -> str | None:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr in methods(found[next(iter(found))]["cls"]) | {
+                m for rec in found.values() for m in methods(rec["cls"])}:
+            return alias.get(_ref(f.value) or "")
+        return None
+
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            parents = {ch: n for n in ast.walk(fn) for ch in ast.iter_child_nodes(n)}
+            seq: list[tuple[str, ast.AST | None]] = []
+            for call in sorted((n for n in ast.walk(fn) if isinstance(n, ast.Call)), key=lambda n: (n.lineno, n.col_offset)):
+                speaker = who(call)
+                if not speaker:
+                    continue
+                loop, cur = None, parents.get(call)
+                while cur is not None and cur is not fn:
+                    if isinstance(cur, (ast.For, ast.AsyncFor, ast.While)):
+                        loop = cur
+                        break
+                    cur = parents.get(cur)
+                if not seq or seq[-1][0] != speaker:
+                    seq.append((speaker, loop))
+            for (a, _), (b, _) in zip(seq, seq[1:]):
+                c.edges.append({"from": a, "to": b, "label": "then", "conditional": False})
+            loops: dict[int, list[str]] = {}
+            for sp, loop in seq:
+                if loop is not None:
+                    loops.setdefault(id(loop), []).append(sp)
+            for turn in loops.values():
+                if len(set(turn)) > 1:
+                    c.edges.append({"from": turn[-1], "to": turn[0], "label": "next round", "conditional": True})
 
 
 # -- framework and structural facts ---------------------------------------------
@@ -938,7 +1317,7 @@ def _factories(c: _Collector) -> list[dict[str, Any]]:
 
     out = []
     for rel, tree in c.trees.items():
-        if TEST_PATH.search(rel.replace(os.sep, "/")):
+        if rel in c.test_files:
             continue
         for node in ast.walk(tree):
             switch, options = None, {}
@@ -996,6 +1375,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     files = files if files is not None else collect(root, max_files=600)
     c = _Collector()
     c.root = root if root.is_dir() else root.parent
+    c.test_files = {f.rel for f in files if is_test_file(f.rel, f.text)}
     for f in files:
         if f.path.suffix.lower() in (".py", ".ipynb"):
             tree = _parse(f)
@@ -1004,6 +1384,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
                 c.project_frameworks.update(_frameworks_imported(_imported_modules(tree), f, c.root))
     for f in files:
         ext = f.path.suffix.lower()
+        if f.rel in c.test_files and any(g.rel not in c.test_files for g in files):
+            continue
         c.file = f.rel
         if ext in {".py", ".ipynb"}:
             _scan_python(f, c)
@@ -1071,6 +1453,10 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
             c.exits.append(seq[-1])
 
     _scan_classes(files, c)
+    _fold_into_nodes(c, files)
+    _link_subgraphs(c)
+    _named_instances(files, c)
+    _message_routes(files, c)
 
     # no framework: every place that calls an LLM is an agent, even when there is only one
     if not c.agents:
@@ -1082,25 +1468,34 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
         if not found["edges"]:  # independent features (chat, export, titles): each starts and ends on its own
             c.entry += [a["name"] for a in found["agents"]]
             c.exits += [a["name"] for a in found["agents"]]
+            c.on_their_own = {a["name"] for a in found["agents"]}
         if found["agents"]:
             c.vote("custom", 1)
 
     # generic fallback: classes named *Agent with a run-ish method
     if not c.agents:
         for f in files:
-            if f.path.suffix != ".py":
+            if f.path.suffix != ".py" or f.rel in c.test_files:
                 continue
             for m in re.finditer(r"^class\s+(\w*Agent)\b[^\n]*:", f.text, re.M):
                 if m.group(1) not in {"Agent", "BaseAgent", "AbstractAgent"}:
                     c.add_agent(m.group(1), file=f.rel, line=f.text.count("\n", 0, m.start()) + 1)
-            for m in re.finditer(r"^(?:async\s+)?def\s+(\w+_agent)\s*\(", f.text, re.M):
+            for m in re.finditer(r"^(?:async\s+)?def\s+(?!test_)(\w+_agent)\s*\(", f.text, re.M):
                 c.add_agent(m.group(1), file=f.rel, line=f.text.count("\n", 0, m.start()) + 1)
+
+    pipelines = _script_pipelines(c, files)
+    if pipelines and c.on_their_own:  # ...unless a script pipeline runs them in order
+        linked_to = {bpmod.norm_key(e["to"]) for e in c.edges}
+        linked_from = {bpmod.norm_key(e["from"]) for e in c.edges}
+        c.entry = [e for e in c.entry if not (e in c.on_their_own and bpmod.norm_key(e) in linked_to)]
+        c.exits = [x for x in c.exits if not (x in c.on_their_own and bpmod.norm_key(x) in linked_from)]
 
     for e in c.edges:
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
     if facts is not None:
-        found = (("ports", _ports(c)), ("config_lists", _config_lists(c, files)), ("factories", _factories(c)))
+        found = (("ports", _ports(c)), ("config_lists", _config_lists(c, files)), ("factories", _factories(c)),
+                 ("script_pipelines", pipelines), ("agent_classes_never_used", c.unused_classes))
         facts.update({k: v for k, v in found if v})
     framework = _framework(c)
     names = [a["name"] for a in c.agents.values()]

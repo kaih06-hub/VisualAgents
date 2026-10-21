@@ -12,11 +12,38 @@
   - an app with no mapped agents shows each caller as its own agent instead of nothing.
   - hook mode now wakes for CrewAI, AutoGen and other frameworks that print their own agents.
 
+- Static analysis maps more shapes of agent system, found missing in a held-out check of ten projects against the
+  graphs in their READMEs (no rule names a project):
+  - several named instances of one model-calling class (`Player(name="Proposer")`, `[Player(name=n) for n in SIDES]`)
+    are the agents, and the order the code asks them in - with a loop's next round - is how work passes;
+  - one function handing a model helper a different role each call (`ask(system_role=triager)`, then `reviewer`,
+    then `chair`) is one agent per role, in call order;
+  - roles that publish actions others watch (`self.set_actions([WriteSpec])` / `self._watch([WriteSpec])`) hand work
+    to each other; a role watching what no role produces is where a run starts;
+  - a LangGraph node that runs a compiled subgraph (`add_node("write", inner.compile())`) leads into the subgraph's
+    entry and back from its exits, and the inner graph's ends are not the run's;
+  - a LangGraph node whose action wraps an agent by name (`wrap(agents["coder_agent"])`, with the agent class
+    declaring `agent_name="coder_agent"`) is that agent: one block, not two;
+  - shell scripts that run the project's scripts in order (`python plan.py`, `python solver_[a/b].py`) are a
+    pipeline: steps link in order, a step that calls no model is still a step, and a step calling into another
+    script's code hands work back to it. Reported to the LLM as the fact `script_pipelines`.
+- New fact for the LLM: `agent_classes_never_used` - agent classes nothing in the project creates or names.
+
 ### Changed
 - The guided start offers `gemini-flash-latest` instead of the pinned `gemini-2.5-flash`, and says that Gemini Pro
   needs billing on the key (a free key has no Pro quota).
 
 ### Fixed
+- Model calls through the pre-1.0 OpenAI SDK (`openai.ChatCompletion.create`, `openai.Completion.create`) are found.
+- Files merely named like tests (`test_designer.py`, `test_executor.py`: agents that write or run tests) are part of
+  the project; files in a tests folder, or holding test-runner code, are left out of the map entirely - stub agents
+  and graphs in a test suite no longer show up as agents.
+- A helper is credited to callers in other files only when they import it: two scripts that each define their own
+  `api_call()` are two agents, named after their scripts, not one. A script whose top-level code writes the prompts
+  is the agent, and an agent named only `main` / `run_llm` / `api_call` is named after its file.
+- One script per dataset or backend defining the same model-calling functions (`coder_math.py`, `coder_code.py`) is
+  one agent; a model helper nothing calls, next to one that is used, is not an agent; a function whose name merely
+  contains "agent" (`generate_response_multiagent`) is not treated as one.
 - Cloning from the guided start: answering `y` / `yes` at "Clone it into [~/agents/…]" clones into the
   suggested folder instead of one called `y` (`n` / `no` cancels), and an existing folder is reused only when it
   is a clone of the same repository - not a clone of something else that happens to have that name.

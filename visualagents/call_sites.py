@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .collector import SourceFile, agent_class_names
+from .collector import SourceFile, agent_class_names, is_test_file
 
 LLM_MODULES = (
     "openai", "anthropic", "google.genai", "google.generativeai", "litellm", "ollama", "mlx_lm", "mlx_vlm",
@@ -29,7 +29,9 @@ LLM_CHAINS = (
     "generate_content", "chat_completion", "text_generation", "create_chat_completion",
 )
 # ...and ones other APIs share (Twilio's messages.create sends an SMS): only in files importing an LLM library
-LLM_CHAINS_IF_IMPORTED = ("messages.create", "messages.stream", "responses.stream", "chat.complete", "chat.stream")
+LLM_CHAINS_IF_IMPORTED = ("messages.create", "messages.stream", "responses.stream", "chat.complete", "chat.stream",
+                          # the pre-1.0 OpenAI SDK, still in many research repos: openai.ChatCompletion.create(...)
+                          "ChatCompletion.create", "ChatCompletion.acreate", "Completion.create", "Completion.acreate")
 # module-level functions of LLM libraries that run the model: litellm.completion, ollama.chat, mlx_lm.generate
 LLM_ENTRY = {"completion", "acompletion", "chat", "achat", "generate", "agenerate", "stream_generate",
              "create_chat_completion", "create_completion", "text_generation", "chat_completion"}
@@ -49,14 +51,25 @@ _MODEL_ORIGIN = re.compile(r"(llm|llama|chat|client|pipeline|model|anthropic|ope
 _NOT_MODEL = re.compile(r"(tokenizer|processor|embedding|embedder|encoder|config|sampler)", re.I)
 _PROMPT_NAME = re.compile(r"(prompt|instruction|template|system|persona|preamble)", re.I)
 # parameters a wrapper receives its prompt through: when the prompt comes in, the caller wrote it
-_PROMPT_PARAMS = re.compile(r"^(\w*_)?(messages|msgs|prompts?|system(_prompt|_message)?|contents|"
+_PROMPT_PARAMS = re.compile(r"^(\w*_)?(messages|msgs?|prompts?|system(_prompt|_message|_role)?|contents|"
                             r"(chat_)?history|conversation)$", re.I)
+# keyword arguments that hand a wrapper the role it plays this time: helper(prompt, system_role=analyst)
+_ROLE_KWARGS = ("system_role", "system", "system_prompt", "system_message", "sys_prompt", "role", "persona",
+                "instructions", "agent_role")
 # "You are LAMBDA, a data analysis agent ..." / "You are a professional data scientist writing reports."
 _PERSONA = re.compile(r"\bYou are\s+(?:(?P<name>[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*){0,3})\s*[,(:\-—–]\s*)?"
                       r"(?:an?|the)\s+(?P<role>[^\n.;!?]{3,120})")
 _MODEL_NAMES = {"chatgpt", "gpt", "claude", "gemini", "llama", "qwen", "deepseek", "mistral", "grok", "ai"}
-_SKIP_PATH = re.compile(r"(^|/)(tests?|testing|examples?|docs?|scripts?/dev)(/|$)|(^|/)test_[^/]*$|_test\.py$")
+_SKIP_PATH = re.compile(r"(^|/)(examples?|docs?|scripts?/dev)(/|$)")
 MAX_AGENTS = 15
+# a function named as an agent (research_agent, run_agent, AgentStep) - not one that merely contains the letters
+_AGENT_WORD = re.compile(r"(?i:(^|_)agents?($|_))|Agents?($|[A-Z_0-9])")
+# function names that say only that they call a model, not which agent they are
+_GENERIC_NAME = re.compile(r"^_*(main|run|run_llm|call|call_llm|call_model|api_call|call_api|query_llm|get_completion|"
+                           r"get_response|llm|infer|inference|request|execute|handler|process)$", re.I)
+# decorators that register a function for a framework or server to call by itself
+_REGISTERS = re.compile(r"(route|get|post|put|delete|websocket|command|tool|task|agent|node|app|on_\w+|listener|"
+                        r"handler|callback|register|entrypoint|function_tool|hook|event|cli|main)", re.I)
 
 
 @dataclass
@@ -73,6 +86,7 @@ class _Fn:
     own_prompt: bool = False
     tools: list[str] = field(default_factory=list)  # tool schemas it defines and hands to the model
     wrapped: list[str] = field(default_factory=list)  # wrapper methods it reaches the model through
+    cls_bases: int = 0  # how many base classes its class names (an override may be called by a framework)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -83,13 +97,21 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     """Agents and edges for LLM call sites: {"agents": [...], "edges": [...]} (empty when there are none)."""
     fns: list[_Fn] = []
     direct: list[_Fn] = []
+    imports: dict[str, _Imports] = {}  # file -> where its names come from
+    referenced: set[str] = set()  # every name and attribute the project's code uses
     for f in files:
-        if f.path.suffix.lower() not in (".py", ".ipynb") or _SKIP_PATH.search(f.rel.replace("\\", "/")):
+        if f.path.suffix.lower() not in (".py", ".ipynb"):  # entry points named in pyproject, shell scripts, configs
+            referenced.update(re.findall(r"[A-Za-z_]\w+", f.text))
+        if f.path.suffix.lower() not in (".py", ".ipynb") or _SKIP_PATH.search(f.rel.replace("\\", "/")) \
+                or is_test_file(f.rel, f.text):
             continue
         try:
             tree = ast.parse(f.text)
         except (SyntaxError, ValueError):
             continue
+        imports[f.rel] = _import_sources(tree)
+        referenced.update(n.id if isinstance(n, ast.Name) else n.attr
+                          for n in ast.walk(tree) if isinstance(n, (ast.Name, ast.Attribute)))
         mods, names = _imports(tree)
         clients = _client_vars(tree, mods, names)
         chains = LLM_CHAINS + (LLM_CHAINS_IF_IMPORTED if _imports_llm(mods, names) else ())
@@ -103,6 +125,11 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     # a class that builds its client in __init__ and calls it in other methods: those calls are what count
     calling = {(fn.rel, fn.cls) for fn in direct if fn.cls and not fn.name.startswith("__")}
     direct = [fn for fn in direct if not (fn.name.startswith("__") and (fn.rel, fn.cls) in calling)]
+    # code nothing calls (an old completion helper left next to the chat one) is not part of any run
+    # (a library's or an app's functions may be called from outside: only one beside a used model call is dropped)
+    dead = {fn.key for fn in direct if _unused(fn, referenced)}
+    used_files = {fn.rel for fn in direct if fn.key not in dead}
+    direct = [fn for fn in direct if fn.key not in dead or fn.rel not in used_files]
     if not direct:
         return {"agents": [], "edges": []}
 
@@ -111,14 +138,27 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         for name, _ in fn.calls:
             callers.setdefault(name, []).append(fn)
 
+    def reaches(c: _Fn, fn: _Fn) -> bool:
+        """Can code in c's file call fn? A function is reached from its own file or from a file importing it; two
+        scripts that each define their own api_call() are not one helper. Methods are called on objects passed
+        around, so any file may reach them."""
+        if c.rel == fn.rel or fn.cls:
+            return True
+        return imports.get(c.rel, _Imports()).reaches(fn.name, fn.rel)
+
     def callers_of(fn: _Fn) -> list[_Fn]:
         if fn.name == "<module>" or fn.name.startswith("__"):  # self.__init__() in reset() is not a model call
             return []
         seen, out = set(), []
-        for c in callers.get(fn.name, []):  # `if __name__ == "__main__": main()` does not make main plumbing
-            if c.key != fn.key and c.key not in seen and c.name != "<module>":
-                seen.add(c.key)
-                out.append(c)
+        for c in callers.get(fn.name, []):
+            if c.key == fn.key or c.key in seen or not reaches(c, fn):
+                continue
+            # `if __name__ == "__main__": main()` does not make main plumbing - but a script whose top-level code
+            # writes the prompts and sends each through its own api_call() helper is the agent
+            if c.name == "<module>" and not (c.rel == fn.rel and c.own_prompt):
+                continue
+            seen.add(c.key)
+            out.append(c)
         return out
 
     sites: dict[tuple[str, str, str], _Fn] = {}
@@ -128,7 +168,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         ups = [c for c in callers_of(fn) if c.key not in trail]
         tools = tools + tuple(t for t in fn.tools if t not in tools)
         # a helper that only forwards someone else's prompt is plumbing: its callers are the agents
-        if ups and not fn.own_prompt and depth < 3 and "agent" not in fn.name.lower():
+        if ups and not fn.own_prompt and depth < 3 and not _AGENT_WORD.search(fn.name):
             if fn.cls and any((c.rel, c.cls) != (fn.rel, fn.cls) for c in ups):
                 services.add((fn.rel, fn.cls))
             # the runtime sees the wrapper (LLMService.stream_chat) when its caller runs it in another task
@@ -145,26 +185,49 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
 
     for fn in direct:
         climb(fn, fn.via, 0, frozenset(), (), ())
+    # ...and so is a caller nothing calls, beside one that is used (a leftover get_output() next to the chat helper)
+    dead = {k for k, fn in sites.items() if _unused(fn, referenced)}
+    if len(dead) < len(sites):
+        sites = {k: fn for k, fn in sites.items() if k not in dead or fn.rel not in used_files}
 
     # a class named or built like an agent (SolverAgent(BaseAgent)) is one agent, whichever of its methods reach the
     # model and however much other code calls them; only a shared client class (LLMService) splits into its methods
     agent_classes = agent_class_names(files)
     agents: dict[str, dict[str, Any]] = {}  # agent id -> agent
+    meta: dict[str, dict[str, Any]] = {}  # agent id -> how it was found: its file, its functions, named after
     owner: dict[str, str] = {}  # function name -> agent id
+    role_edges: list[tuple[str, str]] = []
     for fn in sorted(sites.values(), key=lambda s: (s.rel, s.line)):
+        stem = _stem(fn.rel)
         if fn.cls and ((fn.rel, fn.cls) not in services or fn.cls in agent_classes):
-            aid, name, aliases = f"{fn.rel}:{fn.cls}", fn.cls, [fn.cls, fn.name]
+            aid, name, aliases, named = f"{fn.rel}:{fn.cls}", fn.cls, [fn.cls, fn.name], "class"
         elif fn.name == "<module>":
-            stem = re.sub(r"\.(py|ipynb)$", "", fn.rel.rsplit("/", 1)[-1])
-            aid, name, aliases = f"{fn.rel}:<module>", stem, [stem]
+            aid, name, aliases, named = f"{fn.rel}:<module>", stem, [stem], "file"
         else:  # a function, or one prompt-writing method of a service class (LLMService.generate_title)
-            aid, name, aliases = f"{fn.rel}:{fn.cls or ''}.{fn.name}", fn.name, [fn.name]
+            aid, name, aliases, named = f"{fn.rel}:{fn.cls or ''}.{fn.name}", fn.name, [fn.name], "function"
             if fn.cls:
                 aliases.append(f"{fn.cls}.{fn.name}")
         aliases += [w for w in fn.wrapped if w not in aliases]
         persona, role = _persona(fn.node)
         if persona:  # "You are LAMBDA, a data analysis agent": the agent's own name beats its function's
-            aid, name, aliases = f"{fn.rel}:{persona}", persona, [persona, *aliases]
+            aid, name, aliases, named = f"{fn.rel}:{persona}", persona, [persona, *aliases], "persona"
+        roles = _roles_played(fn) if fn.via else []
+        if len(roles) >= 2:  # one function sending a helper several roles in turn: each role is an agent
+            ids = []
+            for r in roles:
+                rid = f"{fn.rel}:{fn.name}:{r}"
+                if rid not in agents and len(agents) < MAX_AGENTS:
+                    agents[rid] = {"name": r, "role": f"a role {fn.name}() gives {fn.via}()", "description": "",
+                                   "tools": list(fn.tools), "file": fn.rel, "line": fn.line,
+                                   "aliases": [r, f"{fn.name}.{r}"]}
+                    meta[rid] = {"rel": fn.rel, "fns": {fn.name}, "named": "role"}
+                if rid in agents:
+                    ids.append(rid)
+            order = _ordered_roles(fn, roles, ids)
+            role_edges += list(zip(order, order[1:]))
+            if ids:
+                owner.setdefault(fn.name, ids[0])
+            continue
         agent = agents.get(aid)
         if agent is None:
             if len(agents) >= MAX_AGENTS:
@@ -172,22 +235,42 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             agent = agents[aid] = {"name": name, "role": role or f"calls the LLM ({fn.via})",
                                    "description": fn.cls_doc or fn.doc,
                                    "tools": [], "file": fn.rel, "line": fn.line, "aliases": []}
+            meta[aid] = {"rel": fn.rel, "fns": set(), "named": named}
+        meta[aid]["fns"].add(fn.name)
         agent["aliases"] += [a for a in aliases if a not in agent["aliases"]]
         agent["tools"] += [t for t in fn.tools if t not in agent["tools"]]
         if fn.name != "<module>":
             owner.setdefault(fn.name, aid)
+        else:
+            owner.setdefault(f"<module>:{fn.rel}", aid)
+
+    merged = _merge_variants(agents, meta)  # programmer_humaneval.py + programmer_mbpp.py: one programmer
+    _name_after_files(agents, meta)  # api_call() in three scripts: three agents named after their scripts
+    for k, v in list(owner.items()):
+        owner[k] = merged.get(v, v)
 
     edges: list[dict[str, Any]] = []
     seen_edges: set[tuple[str, str]] = set()
 
     def link(a: str, b: str, label: str) -> None:
-        if a != b and (a, b) not in seen_edges and len(edges) < 20:
+        a, b = merged.get(a, a), merged.get(b, b)
+        if a != b and a in agents and b in agents and (a, b) not in seen_edges and len(edges) < 20:
             seen_edges.add((a, b))
             edges.append({"from": agents[a]["name"], "to": agents[b]["name"], "label": label, "conditional": False})
 
+    for a, b in role_edges:
+        link(a, b, "then")
     for fn in fns:
         mine = owner.get(fn.name) if fn.key in sites else None
-        called = [owner[n] for n, _ in sorted(fn.calls, key=lambda c: c[1]) if n in owner and owner[n] in agents]
+        if fn.name == "<module>" and fn.key in sites:
+            mine = owner.get(f"<module>:{fn.rel}")
+        called = []
+        for n, _ in sorted(fn.calls, key=lambda c: c[1]):
+            target = owner.get(n)
+            if target in agents or merged.get(target, "") in agents:
+                fdef = next((s for s in sites.values() if s.name == n), None)
+                if fdef is None or reaches(fn, fdef):
+                    called.append(target)
         if mine:  # an agent that calls another agent hands work to it
             for other in dict.fromkeys(called):
                 link(mine, other, "calls")
@@ -196,6 +279,138 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             for a, b in zip(order, order[1:]):
                 link(a, b, "then")
     return {"agents": list(agents.values()), "edges": edges}
+
+
+def _unused(fn: _Fn, referenced: set[str]) -> bool:
+    """Neither called nor referenced anywhere in the project, nor registered by a decorator. A method only counts
+    when the project uses its class but never that method, and the class has no base it could override."""
+    if fn.name == "<module>" or fn.name.startswith("__") or fn.name in referenced or fn.cls_bases:
+        return False
+    if fn.cls and fn.cls not in referenced:  # a class nobody creates here may be the project's API: keep it
+        return False
+    decos = getattr(fn.node, "decorator_list", [])
+    return not any(_REGISTERS.search(_dotted(d)) for d in decos)
+
+
+@dataclass
+class _Imports:
+    """Where a file's names come from: `from pkg.helpers import api_call`, `from helpers import *`, `import helpers`."""
+    names: dict[str, str] = field(default_factory=dict)  # local name -> the module it is imported from (last part)
+    star: set[str] = field(default_factory=set)  # modules imported with *
+    modules: set[str] = field(default_factory=set)  # modules imported whole (last part)
+
+    def reaches(self, name: str, rel: str) -> bool:
+        parts = rel.replace("\\", "/").split("/")
+        mod = _stem(rel)
+        here = {mod} if mod != "__init__" else {parts[-2] if len(parts) > 1 else mod}
+        return (name in self.names and (self.names[name] in here or self.names[name] == "")) \
+            or bool(here & self.star) or bool(here & self.modules)
+
+
+def _import_sources(tree: ast.AST) -> _Imports:
+    out = _Imports()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.modules.update(a.name.split(".")[-1] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").split(".")[-1]
+            for a in node.names:
+                if a.name == "*":
+                    out.star.add(mod)
+                else:
+                    out.names[a.asname or a.name] = mod
+                    out.modules.add(a.name)  # from pkg import helpers; helpers.api_call()
+    return out
+
+
+def _stem(rel: str) -> str:
+    return re.sub(r"\.(py|ipynb)$", "", rel.replace("\\", "/").rsplit("/", 1)[-1])
+
+
+def _role_value(call: ast.Call) -> str | None:
+    """The role a call hands its helper: system_role=analyst -> "analyst"; an empty or computed one -> None."""
+    for k in call.keywords:
+        if k.arg in _ROLE_KWARGS:
+            v = k.value
+            if isinstance(v, ast.Name):
+                return v.id
+            if isinstance(v, ast.Attribute):
+                return v.attr
+            return None
+    return None
+
+
+def _roles_played(fn: _Fn) -> list[str]:
+    """Distinct named roles fn hands to the helper it reaches the model through, in source order."""
+    out: list[str] = []
+    for call in sorted(_own_calls(fn.node), key=lambda c: (c.lineno, c.col_offset)):
+        if _dotted(call.func).replace("()", "").split(".")[-1] != fn.via:
+            continue
+        r = _role_value(call)
+        if r and r not in out and not _PROMPT_PARAMS.match(r):
+            out.append(r)
+    return out
+
+
+def _ordered_roles(fn: _Fn, roles: list[str], ids: list[str]) -> list[str]:
+    """Agent ids in the order fn runs their roles, a role repeated only when another ran in between."""
+    rid = dict(zip(roles, ids))
+    seq: list[str] = []
+    for call in sorted(_own_calls(fn.node), key=lambda c: (c.lineno, c.col_offset)):
+        if _dotted(call.func).replace("()", "").split(".")[-1] == fn.via:
+            r = _role_value(call)
+            if r in rid and (not seq or seq[-1] != rid[r]):
+                seq.append(rid[r])
+    return seq
+
+
+def _merge_variants(agents: dict[str, dict[str, Any]], meta: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """One script per dataset or backend (solver_math.py, solver_code.py) defining the same functions: the same agent
+    run on different inputs. Merged into the first, named after what the files share. Returns merged id -> kept id."""
+    groups: dict[tuple[str, str, frozenset], list[str]] = {}
+    for aid, m in meta.items():
+        if m["named"] not in ("function", "file") or "_" not in _stem(m["rel"]):
+            continue
+        folder = m["rel"].replace("\\", "/").rsplit("/", 1)[0] if "/" in m["rel"] else ""
+        prefix = _stem(m["rel"]).rsplit("_", 1)[0]
+        fns = frozenset(m["fns"]) if m["named"] == "function" else frozenset({"<module>"})
+        if prefix and not prefix.isdigit():
+            groups.setdefault((folder, prefix, fns), []).append(aid)
+    merged: dict[str, str] = {}
+    for (_, prefix, _), ids in groups.items():
+        if len({meta[i]["rel"] for i in ids}) < 2:
+            continue
+        keep = agents[ids[0]]
+        keep["name"] = prefix
+        meta[ids[0]]["named"] = "merged"
+        keep["aliases"] = [prefix, *keep["aliases"]]
+        for other in ids[1:]:
+            keep["aliases"] += [a for a in agents[other]["aliases"] if a not in keep["aliases"]]
+            keep["tools"] += [t for t in agents[other]["tools"] if t not in keep["tools"]]
+            keep["aliases"] += [_stem(meta[other]["rel"])] if _stem(meta[other]["rel"]) not in keep["aliases"] else []
+            del agents[other]
+            merged[other] = ids[0]
+        if _stem(meta[ids[0]]["rel"]) not in keep["aliases"]:
+            keep["aliases"].append(_stem(meta[ids[0]]["rel"]))
+    return merged
+
+
+def _name_after_files(agents: dict[str, dict[str, Any]], meta: dict[str, dict[str, Any]]) -> None:
+    """Functions of the same name in different files (each script's own api_call()) are different agents: name each
+    after its file so they stay apart on the map. So is one whose name only says it calls a model (main, run_llm)."""
+    by_name: dict[str, list[str]] = {}
+    for aid, a in agents.items():
+        if meta.get(aid, {}).get("named") == "function":
+            by_name.setdefault(a["name"], []).append(aid)
+    for name, ids in by_name.items():
+        # a name that says nothing about the agent (main, api_call, run_llm) is named after its file too
+        if len({meta[i]["rel"] for i in ids}) < 2 and not _GENERIC_NAME.match(name):
+            continue
+        for i in ids:
+            stem = _stem(meta[i]["rel"])
+            agents[i]["name"] = stem
+            if stem not in agents[i]["aliases"]:
+                agents[i]["aliases"].insert(0, stem)
 
 
 # -- helpers -------------------------------------------------------------------------------------------------
@@ -297,14 +512,16 @@ def _own_calls(node: ast.AST):
 
 
 def _not_prompt_text(node: ast.AST) -> set[int]:
-    """ids of nodes inside the docstring, raise statements and log/print calls: their text is not a prompt."""
+    """ids of nodes inside the docstring, raise statements, log/print calls and command-line options: their text is
+    not a prompt."""
     body = getattr(node, "body", [])
     doc = body[0] if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None),
                                                                             ast.Constant) else None
     skip = {id(doc.value)} if doc is not None else set()
     for n in ast.walk(node):
         if isinstance(n, ast.Raise) or (isinstance(n, ast.Call) and re.match(
-                r"(print|warn|.*\.(debug|info|warning|error|exception|critical|warn|log))$", _dotted(n.func))):
+                r"(print|warn|(.*\.)?ArgumentParser|.*\.(debug|info|warning|error|exception|critical|warn|log|"
+                r"add_argument|add_option|add_parser))$", _dotted(n.func))):
             skip |= {id(x) for x in ast.walk(n)}
     return skip
 
@@ -416,6 +633,7 @@ def _functions(tree: ast.Module, rel: str) -> list[_Fn]:
     def add(node, cls, cls_node=None):
         fn = _Fn(rel, cls, node.name, node.lineno, first_line(node), node)
         fn.cls_doc = first_line(cls_node) if cls_node is not None else ""
+        fn.cls_bases = len(cls_node.bases) if cls_node is not None else 0
         fn.calls = [(_dotted(c.func).replace("()", "").split(".")[-1], c.lineno) for c in _own_calls(node)]
         out.append(fn)
 
@@ -433,4 +651,37 @@ def _functions(tree: ast.Module, rel: str) -> list[_Fn]:
         fn = _Fn(rel, None, "<module>", top.body[0].lineno, "", top)
         fn.calls = [(_dotted(c.func).replace("()", "").split(".")[-1], c.lineno) for c in _own_calls(top)]
         out.append(fn)
+    return out
+
+
+def class_llm_methods(files: list[SourceFile]) -> dict[str, set[str]]:
+    """class name -> its methods that reach a model, directly or through another method of the class
+    (ask() -> self.query() -> openai...). Inherited methods are the caller's to resolve."""
+    out: dict[str, set[str]] = {}
+    for f in files:
+        if f.path.suffix.lower() not in (".py", ".ipynb") or is_test_file(f.rel, f.text):
+            continue
+        try:
+            tree = ast.parse(f.text)
+        except (SyntaxError, ValueError):
+            continue
+        mods, names = _imports(tree)
+        clients = _client_vars(tree, mods, names)
+        chains = LLM_CHAINS + (LLM_CHAINS_IF_IMPORTED if _imports_llm(mods, names) else ())
+        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+            methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            hits = {n for n, m in methods.items() if _llm_call(m, mods, names, clients, chains, in_class=True)
+                    and n != "__init__"}
+            grew = True
+            while grew:
+                grew = False
+                for n, m in methods.items():
+                    if n in hits or n == "__init__":
+                        continue
+                    if any(isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name)
+                           and c.func.value.id == "self" and c.func.attr in hits for c in _own_calls(m)):
+                        hits.add(n)
+                        grew = True
+            if hits:
+                out.setdefault(cls.name, set()).update(hits)
     return out
