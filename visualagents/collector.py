@@ -36,6 +36,9 @@ TOOL_CONFIGS = re.compile(
 )
 CONFIG_EXTS = {".yaml", ".yml", ".toml", ".json", ".md"}
 MAX_FILE_BYTES = 400_000
+# Folders that keep an earlier implementation next to the current one (src/legacy/, old/, deprecated/): their agents
+# are not part of today's system, as long as there is code outside them.
+SUPERSEDED_DIRS = re.compile(r"^(legacy|deprecated|obsolete|old|_old|attic)$", re.I)
 
 AGENT_HINTS = re.compile(
     r"\b(agent|agents|crew|crewai|autogen|langgraph|langchain|StateGraph|add_node|add_edge|handoff|"
@@ -48,6 +51,28 @@ NAME_HINTS = re.compile(r"(agent|crew|graph|workflow|flow|team|main|app|orchestr
 # Tests restate agents with mocks and fixtures: never worth budget the real definitions could use.
 TEST_PATH = re.compile(r"(^|/)(tests?|testing|__tests__)/|(^|/)(test_[^/]*|[^/]*_test\.py|conftest\.py|"
                        r"[^/]*\.(test|spec)\.[jt]sx?)$")
+TEST_DIR = re.compile(r"(^|/)(tests?|testing|__tests__)/|(^|/)conftest\.py$|\.(test|spec)\.[jt]sx?$")
+# what a test module contains: a test runner import or a test class
+_TEST_CODE = re.compile(r"^\s*(import (pytest|unittest)\b|from (pytest|unittest)\b|class Test\w*\b)", re.M)
+_TEST_FUNC = re.compile(r"^(?:async\s+)?def (test\w*)\s*\(", re.M)
+
+
+def is_test_file(rel: str, text: str | None = None) -> bool:
+    """A test of the project, not part of it. A file in a tests folder always is; a file merely named like one
+    (test_designer.py, test_executor.py: an agent that designs or runs tests) is only when it holds test code."""
+    rel = rel.replace(os.sep, "/")
+    if TEST_DIR.search(rel):
+        return True
+    if not TEST_PATH.search(rel):
+        return False
+    if text is None or _TEST_CODE.search(text):
+        return True
+    # test functions a runner collects: the module never mentions them again (a script's test_report(...) it runs
+    # from __main__, or an agent's instruction=test_runner_instruction_provider, is its own code)
+    tests = _TEST_FUNC.findall(text)
+    return any(len(re.findall(rf"\b{t}\b", text)) == 1 for t in tests)
+
+
 # Classes that are agents by name, or by what they inherit from (directly or through the project's own classes).
 AGENT_CLASS_NAME = re.compile(r"(Agent|Expert|Persona)$")
 AGENT_BASES = {"Agent", "ChatAgent", "ConversableAgent", "AssistantAgent", "UserProxyAgent", "Role",
@@ -167,15 +192,33 @@ def collect(root: Path, max_files: int = 400) -> list[SourceFile]:
             score = 5 if p.stem.lower() == "readme" and rel.count(os.sep) == 0 else score * 0.2
         if p.suffix in {".json", ".toml"}:
             score *= 0.3
-        if "test" in rel.lower():
+        if is_test_file(rel, text):
             score *= 0.3
         out.append(SourceFile(p, rel, text, score))
         if len(out) >= max_files * 4:
             break
+    out = drop_superseded(out)
     for f in _mark_agent_files(out):
         f.score += AGENT_FILE_BONUS
     out.sort(key=lambda f: (-f.score, f.rel))
     return out[:max_files]
+
+
+def superseded(rel: str) -> bool:
+    """Is this file inside a folder that keeps an older implementation (legacy/, deprecated/, old/)?"""
+    return any(SUPERSEDED_DIRS.match(part) for part in Path(rel).parts[:-1])
+
+
+def drop_superseded(files: list[SourceFile]) -> list[SourceFile]:
+    """Leave out the older implementation kept in legacy/ (or deprecated/, old/) folders - unless the project's code
+    lives only there."""
+    code = (".py", ".ipynb", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".jsx")
+    old = [f for f in files if superseded(f.rel)]
+    current = [f for f in files if not superseded(f.rel) and f.path.suffix.lower() in code
+               and f.path.name not in {"setup.py", "conftest.py", "noxfile.py", "__init__.py"}]
+    if not old or not current:  # a setup.py next to legacy/ is not a newer implementation
+        return files
+    return [f for f in files if not superseded(f.rel)]
 
 
 def _classes(f: SourceFile) -> list[ast.ClassDef]:
@@ -212,7 +255,7 @@ def _mark_agent_files(files: list[SourceFile]) -> list[SourceFile]:
     """Files that define an agent class (see agent_class_names)."""
     marked = []
     for f, names in _agent_classes(files)[1]:
-        if names and not TEST_PATH.search(f.rel.replace(os.sep, "/")):
+        if names and not is_test_file(f.rel, f.text):
             f.defines_agent = True
             marked.append(f)
     return marked
@@ -287,7 +330,7 @@ def outline(files: list[SourceFile], budget_chars: int) -> str:
     by path so siblings sit together; when the budget is short, the lowest-ranked files are left out."""
     blocks = []
     for rank, f in enumerate(files):
-        if TEST_PATH.search(f.rel.replace(os.sep, "/")) or f.path.suffix.lower() in CONFIG_EXTS - {".yaml", ".yml"}:
+        if is_test_file(f.rel, f.text) or f.path.suffix.lower() in CONFIG_EXTS - {".yaml", ".yml"}:
             continue
         body = _outline_lines(f)
         if len(body) > OUTLINE_LINES:
@@ -371,7 +414,7 @@ def pack(files: list[SourceFile], budget_chars: int = 180_000, prefer: set[str] 
     its classes, prompts and model calls; one that does not fit is skipped, and smaller ones after it still get in.
     Returns (text, included rel paths, marked " (excerpt)" when cut)."""
     prefer = set(prefer)
-    source = [f for f in files if not TEST_PATH.search(f.rel.replace(os.sep, "/"))] or files
+    source = [f for f in files if not is_test_file(f.rel, f.text)] or files
     shape = outline(source, budget_chars // 4)
     parts = [f"<repo_outline>\n{shape}</repo_outline>\n"] if shape else []
     used = sum(len(p) for p in parts)

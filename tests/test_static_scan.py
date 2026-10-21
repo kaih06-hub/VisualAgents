@@ -77,11 +77,17 @@ def test_autogen_group_chat(tmp_path):
         "planner = autogen.AssistantAgent(name='planner', system_message='Plan')\n"
         "coder = autogen.AssistantAgent(name='coder', system_message='Code')\n"
         "critic = autogen.AssistantAgent(name='critic', system_message='Review')\n"
-        "chat = autogen.GroupChat(agents=[planner, coder, critic], messages=[])\n"
+        "user = autogen.UserProxyAgent(name='user')\n"
+        "chat = autogen.GroupChat(agents=[user, planner, coder, critic], messages=[])\n"
     )
     bp = scan(tmp_path)
     assert bp["framework"] == "autogen"
-    assert ("critic", "planner") in edges(bp)
+    # the manager picks each speaker: the listed order, not a ring, and the person is not a scheduled speaker
+    assert edges(bp) == {("planner", "coder"), ("coder", "critic")}
+
+    (tmp_path / "chat.py").write_text((tmp_path / "chat.py").read_text().replace(
+        "messages=[])", "messages=[], speaker_selection_method='round_robin')"))
+    assert ("critic", "user") in edges(scan(tmp_path))  # round robin goes round
 
 
 def test_classes_that_call_an_llm_are_agents_without_a_framework(tmp_path):
