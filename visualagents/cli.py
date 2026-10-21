@@ -323,6 +323,11 @@ def cmd_run(args, command: list[str]) -> int:
     if command:
         if command[0].endswith(".py") and not shutil.which(command[0]) and (cwd / command[0]).exists():
             command = [shutil.which("python3") or shutil.which("python") or sys.executable, *command]
+        elif os.sep not in command[0] and not shutil.which(command[0]):
+            venv = detect.best_venv(project, os.path.relpath(cwd, project))
+            if venv is not None and detect.venv_bin(venv, command[0]).exists():  # e.g. -- redrock-chat
+                command = [str(detect.venv_bin(venv, command[0])), *command[1:]]
+                termui.info(f"using the project's virtualenv: {os.path.relpath(venv, project)}")
     else:
         cand = None if args.pick else detect.load_saved(project)
         if cand is None:

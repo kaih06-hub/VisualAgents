@@ -58,7 +58,7 @@ def test_offline_path_maps_and_starts_the_project(monkeypatch, project):
 def test_pasted_key_is_checked_saved_and_reused(monkeypatch, project):
     for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "VISUALAGENTS_PROVIDER", "VISUALAGENTS_MODEL"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(llm, "list_models", lambda provider: ["gemini-2.5-flash", "gemini-pro-latest"])
+    monkeypatch.setattr(llm, "list_models", lambda provider: ["gemini-flash-latest", "gemini-pro-latest"])
     scanned = {}
 
     def fake_scan(path, **kw):
@@ -68,10 +68,10 @@ def test_pasted_key_is_checked_saved_and_reused(monkeypatch, project):
         return scan(path)
 
     monkeypatch.setattr("visualagents.scanner.scan_project", fake_scan)
-    Script(monkeypatch, ["Another folder", "Google Gemini", "gemini-2.5-flash", "Just show the map"],
+    Script(monkeypatch, ["Another folder", "Google Gemini", "gemini-flash-latest", "Just show the map"],
            texts=[str(project)], secrets=["AIza-test-key-1234"])
     assert wizard.run(_args()) == 0
-    assert scanned["provider"] == "google" and scanned["model"] == "gemini-2.5-flash"
+    assert scanned["provider"] == "google" and scanned["model"] == "gemini-flash-latest"
     keys = json.loads((home.home() / "keys.json").read_text())
     assert keys == {"GEMINI_API_KEY": "AIza-test-key-1234"}
     assert oct(os.stat(home.home() / "keys.json").st_mode & 0o777) == "0o600"
@@ -79,10 +79,24 @@ def test_pasted_key_is_checked_saved_and_reused(monkeypatch, project):
 
     # second time: the project is "last used", Gemini is pre-selected and the saved key is offered
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    s = Script(monkeypatch, [project.name, "Google Gemini", "gemini-2.5-flash", "Use the key I already have",
+    s = Script(monkeypatch, [project.name, "Google Gemini", "gemini-flash-latest", "Use the key I already have",
                              "Just show the map"])
     assert wizard.run(_args()) == 0
     assert "Use the key I already have  ••••1234" in s.seen[3]
+
+
+def test_google_choices_are_aliases_that_follow_googles_current_models():
+    """A pinned version (gemini-2.5-flash) goes stale and is eventually retired for new keys; the -latest aliases
+    always point at a model Google serves."""
+    google = [m for m, _ in wizard.MODEL_CHOICES["google"]]
+    assert google == ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    assert all(m.endswith("-latest") for m in google)
+
+
+def test_a_pinned_model_saved_earlier_is_offered_first(monkeypatch):
+    s = Script(monkeypatch, ["gemini-3.8-flash"])
+    assert wizard._ask_model("google", "gemini-3.8-flash") == "gemini-3.8-flash"
+    assert s.seen[0][:4] == ["gemini-3.8-flash", "gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]
 
 
 def test_bad_key_is_not_saved(monkeypatch, project):

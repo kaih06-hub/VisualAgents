@@ -267,7 +267,8 @@ class Tracker:
             self._wake()
         soft = bool(p.get("soft") or p.get("hint"))  # hint: agent name guessed from the call stack
         name = p.get("agent")
-        aid = self._lookup(name, create=not soft) if name else None
+        hints = [h for h in p.get("hints") or [] if isinstance(h, str)] if isinstance(p.get("hints"), list) else []
+        aid = self._lookup(name, create=not soft, hints=hints) if name else None
         out: list[dict[str, Any]] = []
         text = str(p.get("text") or p.get("output") or p.get("input") or "")
 
@@ -366,15 +367,20 @@ class Tracker:
         self.step_index = -1
         self.step_seen = set()
 
-    def _lookup(self, name: Any, create: bool) -> str | None:
+    def _lookup(self, name: Any, create: bool, hints: list[str] | tuple = ()) -> str | None:
         if not name:
             return None
-        aid = self.matcher.resolve(str(name))
-        if aid is None and create:
-            aid = self._discover(str(name))
-        if aid is None and not create and len(self.bp["agents"]) == 1:
-            aid = self.bp["agents"][0]["id"]  # single-agent app: whatever made the call is that agent
-        return aid
+        for candidate in (str(name), *hints):  # the code that called the model, then whoever called it
+            aid = self.matcher.resolve(candidate)
+            if aid is not None:
+                return aid
+        if create:
+            return self._discover(str(name))
+        if len(self.bp["agents"]) == 1:
+            return self.bp["agents"][0]["id"]  # single-agent app: whatever made the call is that agent
+        if not self.bp["agents"]:
+            return self._discover(str(name))  # nothing mapped: show whatever calls the model as its own agent
+        return None
 
     def _discover(self, name: str) -> str | None:
         """An agent the blueprint missed: add it so it still shows up on the map."""

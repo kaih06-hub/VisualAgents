@@ -28,6 +28,13 @@ _RUN_LINE = re.compile(
 )
 _NOT_RUN = re.compile(r"\b(pip|install|venv|virtualenv|setup\.py|pytest|test|lint|build|format|mypy|ruff|black|"
                       r"stop|kill|clean|uninstall|teardown|down|reset)\b")
+# A project's own console scripts, by what they are for. Chat CLIs show the agent working in the terminal;
+# servers usually print nothing per request; utilities are not ways to start the agent at all.
+_CHAT_SCRIPT = re.compile(r"(^|[-_])(chat|agent|agents|ask|repl|cli|assistant|query|talk)([-_]|$)", re.I)
+_UTILITY_SCRIPT = re.compile(r"(^|[-_])(doctor|check|setup|init|config|configure|migrate|download|version|seed|"
+                             r"install|test|lint|format|clean|reset|stop)([-_]|$)", re.I)
+_BATCH_SCRIPT = re.compile(r"(^|[-_])(load|ingest|index|import|export|sync|backfill|embed)([-_]|$)", re.I)
+_JS_DEV = re.compile(r"^(npm|pnpm|yarn|bun|npx)$|^(next|vite)$")
 _VENV_TOOLS = {"python", "python3", "uvicorn", "streamlit", "chainlit", "gradio", "fastapi", "flask", "jupyter",
                "hypercorn", "gunicorn", "celery", "panel"}
 _ENTRY_NAMES = ("main.py", "app.py", "run.py", "server.py", "cli.py", "agent.py", "agents.py", "chat.py",
@@ -139,7 +146,11 @@ def resolve(project: Path, cand: Candidate) -> tuple[list[str], list[str]]:
         return argv, notes
     head = Path(argv[0]).name
     venv = best_venv(project, cand.cwd)
-    if head in _VENV_TOOLS and "/" not in argv[0]:
+    if (head not in _VENV_TOOLS and "/" not in argv[0] and venv is not None
+            and venv_bin(venv, head).exists()):  # the project's own console scripts (redrock-chat, ...)
+        argv[0] = str(venv_bin(venv, head))
+        notes.append(f"using the project's virtualenv: {venv.relative_to(project)}")
+    elif head in _VENV_TOOLS and "/" not in argv[0]:
         if venv is not None and venv_bin(venv, head if head != "python3" else "python").exists():
             argv[0] = str(venv_bin(venv, head if head != "python3" else "python"))
             notes.append(f"using the project's virtualenv: {venv.relative_to(project)}")
@@ -184,12 +195,17 @@ def working_python(preferred: str = "python3") -> str:
 def detect(project: Path) -> list[Candidate]:
     project = Path(project).resolve()
     cands: list[Candidate] = []
+    python_entries = _from_python_entries(project)
     cands += _from_readme(project)
     cands += _from_scripts(project)
-    cands += _from_python_entries(project)
+    cands += python_entries
     cands += _from_pyproject(project)
     cands += _from_makefile(project)
     cands += _from_package_json(project)
+    if python_entries or _project_scripts(project):
+        for c in cands:  # a JS front end in a subfolder of a Python project shows the UI, not the agents
+            if c.cwd not in (".", "") and _JS_DEV.match(Path(c.command[0]).name if c.command else ""):
+                c.score -= 40
     seen: set[tuple[str, str]] = set()
     out = []
     for c in sorted(cands, key=lambda c: -c.score):
@@ -216,6 +232,7 @@ def _from_readme(project: Path) -> list[Candidate]:
     shells = {"", "bash", "sh", "shell", "console", "zsh", "text", "cmd", "terminal", "powershell"}
     blocks = [body for lang, body in re.findall(r"^[ \t]*```[ \t]*([\w+-]*)[^\n]*\n(.*?)^[ \t]*```", text, re.S | re.M)
               if lang.lower() in shells]
+    own = _project_scripts(project)
     order = 0
     for block in blocks:
         cwd = "."
@@ -231,9 +248,13 @@ def _from_readme(project: Path) -> list[Candidate]:
                     if not target.startswith(("/", "~", "$")) and "<" not in target:
                         cwd = os.path.normpath(os.path.join(cwd, target))
                     continue
-                if not _RUN_LINE.match(part) or _NOT_RUN.search(part.split(" #")[0]):
-                    continue
                 cmd_text = part.split(" #")[0].strip()
+                first = cmd_text.split(" ", 1)[0]
+                if first in own:  # `redrock-serve   # terminal 1` - the project's own command
+                    if _UTILITY_SCRIPT.search(first):
+                        continue
+                elif not _RUN_LINE.match(part) or _NOT_RUN.search(cmd_text):
+                    continue
                 try:
                     argv = shlex.split(cmd_text)
                 except ValueError:
@@ -241,8 +262,59 @@ def _from_readme(project: Path) -> list[Candidate]:
                 if not (project / cwd).is_dir() or not _files_exist(project / cwd, argv):
                     continue
                 order += 1
-                out.append(Candidate(argv, cwd, "README", score=100 - order))
+                out.append(Candidate(argv, cwd, "README", score=100 - order + _script_bonus(first, own)))
     return out
+
+
+def _project_scripts(project: Path) -> list[str]:
+    """Console-script names the project defines in pyproject.toml (PEP 621 or Poetry)."""
+    p = project / "pyproject.toml"
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        try:
+            import tomllib  # type: ignore
+        except ImportError:  # Python 3.10
+            import tomli as tomllib  # type: ignore
+    except ImportError:
+        return _scripts_tables(text)
+    try:
+        data = tomllib.loads(text)
+    except Exception:
+        return []
+    scripts = dict((data.get("project") or {}).get("scripts") or {})
+    scripts.update(((data.get("tool") or {}).get("poetry") or {}).get("scripts") or {})
+    return list(scripts)
+
+
+_TOML_TABLE = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$")
+_TOML_KEY = re.compile(r"""^\s*(["']?)([\w.\-]+)\1\s*=""")
+
+
+def _scripts_tables(text: str) -> list[str]:
+    """The keys of [project.scripts] and [tool.poetry.scripts], for a Python with no TOML reader (3.10 without
+    tomli): enough to know which commands are the project's own."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        table = _TOML_TABLE.match(line)
+        if table:
+            inside = table.group(1).replace('"', "").replace(" ", "") in ("project.scripts", "tool.poetry.scripts")
+            continue
+        key = _TOML_KEY.match(line) if inside else None
+        if key and key.group(2) not in out:
+            out.append(key.group(2))
+    return out
+
+
+def _script_bonus(name: str, own: list[str]) -> int:
+    if name not in own:
+        return 0
+    if _CHAT_SCRIPT.search(name):
+        return 5
+    return -30 if _BATCH_SCRIPT.search(name) else 0
 
 
 def _files_exist(base: Path, argv: list[str]) -> bool:
@@ -293,18 +365,15 @@ def _from_python_entries(project: Path) -> list[Candidate]:
 
 
 def _from_pyproject(project: Path) -> list[Candidate]:
-    p = project / "pyproject.toml"
-    if not p.is_file():
-        return []
-    try:
-        import tomllib  # type: ignore
-
-        data = tomllib.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    scripts = (data.get("project") or {}).get("scripts") or {}
-    scripts.update(((data.get("tool") or {}).get("poetry") or {}).get("scripts") or {})
-    return [Candidate([name], ".", "pyproject script", score=55) for name in list(scripts)[:4]]
+    own = _project_scripts(project)
+    out = []
+    for name in own:
+        if _UTILITY_SCRIPT.search(name):
+            continue
+        # an interactive chat CLI is the best thing to watch, even when the README leads with a server
+        score = 100 if _CHAT_SCRIPT.search(name) else 55 + _script_bonus(name, own)
+        out.append(Candidate([name], ".", "pyproject script", score=score))
+    return out[:6]
 
 
 def _from_makefile(project: Path) -> list[Candidate]:

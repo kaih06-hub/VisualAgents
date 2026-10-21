@@ -68,9 +68,94 @@ def test_scan_uses_structured_output_and_merges_static_aliases(monkeypatch, tmp_
     assert captured["output_config"]["format"]["type"] == "json_schema"
     assert captured["output_config"]["effort"] == "high"
     assert "<static_analysis_hints>" in captured["messages"][0]["content"]
+    assert "<repo_outline>" in captured["messages"][0]["content"]  # every file's shape, not just the ones in full
     assert bp["generated_by"] == "anthropic:claude-opus-5-5"
     assert [a["id"] for a in bp["agents"]] == ["planner", "writer"]
     assert "Writer" in bp["agents"][1]["aliases"] or bp["agents"][1]["name"] == "Writer"
+
+
+def _agent(name, file="", line=0):
+    return {"id": bpm.slugify(name), "name": name, "role": "", "description": "", "tools": [], "file": file,
+            "line": line, "aliases": [], "keywords": []}
+
+
+def test_structural_facts_reach_the_llm_and_its_map_is_kept_as_drawn(monkeypatch, tmp_path):
+    (tmp_path / "team").mkdir()
+    (tmp_path / "team" / "graph.py").write_text(
+        "from langgraph.graph import StateGraph\n"
+        "g = StateGraph(dict)\n"
+        + "".join(f"g.add_node('{n}', {n})\n" for n in ("planner", "researcher", "writer", "reviewer"))
+    )
+    (tmp_path / "team" / "autogen_version").mkdir()
+    (tmp_path / "team" / "autogen_version" / "chat.py").write_text(
+        "from autogen import ConversableAgent\n"
+        + "".join(f"{n.lower()} = ConversableAgent(name='{n}', system_message='x')\n"
+                  for n in ("Coordinator", "Researcher", "Writer", "Reviewer"))
+    )
+    payload = {
+        "project": "team", "framework": "langgraph", "summary": "A research team; an AutoGen version is not drawn.",
+        "agents": [_agent("Planner", "team/graph.py", 3), _agent("Researcher", "team/graph.py", 4),
+                   _agent("Coordinator", "team/autogen_version/chat.py", 2)],
+        "edges": [{"from": "planner", "to": "researcher", "label": "", "conditional": False}],
+        "entry": ["planner"], "exits": ["researcher"], "steps": [],
+    }
+    captured = {}
+    _fake_anthropic(monkeypatch, payload, captured)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    bp = scanner.scan_project(tmp_path, mode="llm", log=lambda m: None)
+
+    hints = captured["messages"][0]["content"].split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0]
+    folders = {i["framework"]: i["folder"] for i in json.loads(hints)["facts"]["ports"][0]["implementations"]}
+    assert folders == {"langgraph": "team", "autogen": "team/autogen_version"}
+    # the model weighs the facts; nothing it drew is deleted behind its back
+    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "coordinator"]
+
+
+def test_the_scan_prompt_teaches_structures_not_particular_projects():
+    """The guidance is meant to carry over to projects nobody has looked at: patterns, with made-up examples -
+    never the names, classes or folders of the projects it was checked against."""
+    prompt = llm.SCAN_SYSTEM.lower()
+    for structure in ("pipeline:", "router or supervisor:", "turn-taking:", "critic loop:", "planner and executors:",
+                      "fan-out:", "nested team:", "several independent systems:", "alternatives", "opt-in parts:",
+                      "apps built with the project"):
+        assert structure in prompt
+    for particular in ("storm", "wikiwriter", "topicexpert", "taskweaver", "code_interpreter", "cli-only", "owl",
+                       "community_usecase", "gpt-researcher", "ag2", "chiefeditor", "lambda", "voyager", "xagent",
+                       "hedge", "agentlaboratory", "open_deep_research"):
+        assert particular not in prompt, particular
+
+
+def test_every_independent_system_reaches_the_llm(monkeypatch, tmp_path):
+    """Two pipelines in one package (STORM and Co-STORM): both show up in the hints and in the source sent in full,
+    and the prompt asks for every system - not only the one with more code."""
+    (tmp_path / "wiki").mkdir()
+    (tmp_path / "wiki" / "curation.py").write_text(
+        "import dspy\n"
+        "class WikiWriter(dspy.Module):\n"
+        "    def __init__(self):\n"
+        "        self.ask = dspy.ChainOfThought('topic -> question')\n"
+        "class TopicExpert(dspy.Module):\n"
+        "    def __init__(self):\n"
+        "        self.answer = dspy.Predict('question -> answer')\n"
+        "w, e = WikiWriter(), TopicExpert()\n"
+    )
+    (tmp_path / "chat").mkdir()
+    for i in range(6):  # a bigger second system
+        (tmp_path / "chat" / f"agent_{i}.py").write_text(
+            "from interface import Agent\n" f"class Expert{i}(Agent):\n" "    def act(self):\n"
+            + "        self.turn += 1\n" * 40)
+    payload = {"project": "storm", "framework": "dspy", "summary": "s", "agents": [_agent("WikiWriter")],
+               "edges": [], "entry": [], "exits": [], "steps": []}
+    captured = {}
+    _fake_anthropic(monkeypatch, payload, captured)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    scanner.scan_project(tmp_path, mode="llm", max_chars=20_000, log=lambda m: None)
+
+    prompt = captured["messages"][0]["content"]
+    hints = json.loads(prompt.split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0])
+    assert {"WikiWriter", "TopicExpert", "Expert0", "Expert5"} <= {a["name"] for a in hints["agents"]}
+    assert '<file path="wiki/curation.py">' in prompt
+    assert "several independent systems" in captured["system"].lower()
 
 
 def test_refusal_and_truncation_raise(monkeypatch):

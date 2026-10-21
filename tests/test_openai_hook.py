@@ -133,3 +133,117 @@ def test_async_streamed_tool_calls_and_results(tmp_path, fake_openai):
     assert ("tool", "execute_python", 'execute_python({"code": "df.head()"})') in sdk
     assert ("observation", "execute_python", "5 rows") in sdk
     assert t.snapshot()["agents"]["llmservice"]["tools"] == 1
+
+
+# LAMBDA's real shape: a shared LLMService (client wrapper + title helper), the agent loop in a route handler
+# that names itself in its system prompt and runs the model call in a keepalive task, and a report exporter.
+LAMBDA_APP = """
+import asyncio, sys, openai
+
+
+class LLMService:
+    def __init__(self):
+        self.client = openai.AsyncOpenAI(api_key="x", base_url=sys.argv[1])
+
+    async def stream_chat(self, messages, model=None):
+        \"\"\"Stream chat completion with tool support.\"\"\"
+        tools = [{"type": "function", "function": {"name": "execute_python", "description": "Run Python code",
+                  "parameters": {"type": "object"}}}]
+        stream = await self.client.chat.completions.create(model="m", messages=messages, tools=tools, stream=True)
+        async for c in stream:
+            d = c.choices[0].delta if c.choices else None
+            if d and d.tool_calls:
+                yield {"type": "tool_call", "id": d.tool_calls[0].id}
+            elif d and d.content:
+                yield {"type": "content", "content": d.content}
+
+    async def chat(self, messages, model=None):
+        r = await self.client.chat.completions.create(model="m", messages=messages)
+        return r.choices[0].message.content
+
+    async def generate_title(self, first_message):
+        msgs = [{"role": "system", "content": "Generate a short, concise title for this conversation."},
+                {"role": "user", "content": first_message}]
+        r = await self.client.chat.completions.create(model="m", messages=msgs)
+        return r.choices[0].message.content
+
+
+llm_service = LLMService()
+
+
+class NotebookKernel:
+    def __init__(self, session_id):
+        self.session_id = session_id
+
+    def reset(self):
+        self.__init__(self.session_id)
+
+
+async def stream_with_keepalive(source):
+    queue = asyncio.Queue()
+
+    async def produce():
+        async for item in source:
+            await queue.put(item)
+        await queue.put(None)
+
+    asyncio.create_task(produce())
+    while (item := await queue.get()) is not None:
+        yield item
+
+
+async def stream_chat_response(question):
+    system_prompt = f\"\"\"You are LAMBDA, a data analysis agent that helps users inspect datasets and run analysis.
+Today is {1}.\"\"\"
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
+    for step in range(3):
+        calls = [c async for c in stream_with_keepalive(llm_service.stream_chat(messages)) if c["type"] == "tool_call"]
+        if not calls:
+            return
+        NotebookKernel("s").reset()
+        messages += [{"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function",
+                      "function": {"name": "execute_python", "arguments": "{}"}}]},
+                     {"role": "tool", "tool_call_id": "t1", "content": "5 rows"}]
+
+
+async def export_report():
+    return await llm_service.chat([
+        {"role": "system", "content": "You are a professional data scientist writing comprehensive analysis reports."},
+        {"role": "user", "content": "the session"}])
+
+
+async def generate_conversation_title():
+    return await llm_service.generate_title("explore the housing data")
+
+
+async def main():
+    await generate_conversation_title()
+    await stream_chat_response("explore the housing data")
+    await export_report()
+
+asyncio.run(main())
+"""
+
+
+def test_a_shared_llm_service_maps_to_the_agents_that_use_it(tmp_path, fake_openai):
+    """LAMBDA: the agent is the code that writes the prompt and runs the loop, not the client wrapper it calls,
+    and its calls still light it up when the wrapper runs in another asyncio task."""
+    from visualagents import static_scan
+
+    (tmp_path / "app.py").write_text(LAMBDA_APP)
+    bp = static_scan.scan(tmp_path)
+    agents = {a["id"]: a for a in bp["agents"]}
+    assert sorted(agents) == ["export_report", "generate_title", "lambda"]  # no LLMService, no NotebookKernel
+    assert agents["lambda"]["role"] == "data analysis agent"
+    assert agents["lambda"]["tools"] == ["execute_python"]
+    assert agents["export_report"]["role"] == "professional data scientist writing comprehensive analysis reports"
+
+    hub = Hub(bp)
+    code = run_command([sys.executable, str(tmp_path / "app.py"), fake_openai], hub, cwd=tmp_path,
+                       server_url="http://127.0.0.1:9", instrument=True, use_pty=False, echo=False)
+    assert code == 0
+    snap = hub.tracker.snapshot()
+    assert [p["agent"] for p in snap["path"]] == ["generate_title", "lambda", "export_report"]
+    assert not snap["extra_agents"]
+    tools = [(e["agent"], e["text"]) for e in hub.tracker.events if e["source"] == "sdk" and e["kind"] == "tool"]
+    assert ("lambda", 'execute_python({"code": "df.head()"})') in tools

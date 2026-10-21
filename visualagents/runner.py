@@ -6,6 +6,7 @@ import codecs
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -124,6 +125,17 @@ def run_command(
     env = build_env(server_url, hub.token, instrument=instrument, use_pty=use_pty)
     hub.run_started(label or shlex.join(command))
     echo_fn = _terminal_echo if echo else None
+    exe = command[0] if command else ""
+    if exe and not (shutil.which(exe, path=env.get("PATH")) if os.sep not in exe else (Path(cwd) / exe).exists()):
+        # a pty child that fails to exec just exits 127, so say it here - in the feed and in the terminal
+        hub.system(f"Command not found: {exe}")
+        from . import termui
+
+        termui.error(f"Command not found: {exe}\n"
+                     f"  If it is installed in the project's virtualenv, activate it first, or pick the command "
+                     f"again: visualagents run {shlex.quote(str(cwd))} --pick")
+        hub.run_finished(127)
+        return 127
     try:
         if use_pty:
             code = _run_pty(command, hub, cwd, env, echo_fn)
