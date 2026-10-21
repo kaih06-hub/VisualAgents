@@ -112,3 +112,63 @@ def test_bad_key_is_not_saved(monkeypatch, project):
     assert wizard.run(_args()) == 0
     assert not (home.home() / "keys.json").exists()
     assert (project / ".visualagents" / "blueprint.json").exists()  # fell back to the offline map
+
+
+URL = "https://github.com/kaih06-hub/VisualAgents.git"
+
+
+@pytest.fixture
+def fake_clone(monkeypatch, tmp_path):
+    """git clone that only records the call and creates the folder; HOME points at tmp_path."""
+    import subprocess
+    import types
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    real_run = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if cmd[:2] != ["git", "clone"]:
+            return real_run(cmd, *a, **kw)
+        calls.append(cmd)
+        (Path(cmd[-1]) / ".git").mkdir(parents=True)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    return calls
+
+
+@pytest.mark.parametrize("answer", ["y", "Yes", ""])
+def test_yes_at_the_clone_prompt_clones_into_the_default_folder(monkeypatch, tmp_path, fake_clone, answer):
+    Script(monkeypatch, [], texts=[answer] if answer else [])
+    dest = wizard._clone(URL)
+    assert dest == tmp_path / "agents" / "VisualAgents"
+    assert fake_clone[0][:4] == ["git", "clone", "--depth", "1"] and fake_clone[0][-1] == str(dest)
+    assert not (tmp_path / "y").exists() and not (tmp_path / "Yes").exists()
+
+
+def test_no_at_the_clone_prompt_cancels_the_clone(monkeypatch, fake_clone):
+    Script(monkeypatch, [], texts=["no"])
+    assert wizard._clone(URL) is None
+    assert fake_clone == []
+
+
+def _repo(path, origin):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+
+
+def test_an_existing_clone_is_reused_only_when_it_is_the_same_repository(monkeypatch, tmp_path, fake_clone):
+    other = tmp_path / "y"
+    _repo(other, "https://github.com/AMA-CMFAI/LAMBDA.git")
+    Script(monkeypatch, [], texts=[str(other)])
+    assert wizard._clone(URL) is None  # a clone of another repository is not "the existing clone"
+
+    same = tmp_path / "agents" / "VisualAgents"
+    _repo(same, "git@github.com:kaih06-hub/VisualAgents")  # ssh form, no .git: still the same repository
+    Script(monkeypatch, [], texts=[str(same)])
+    assert wizard._clone(URL) == same
+    assert fake_clone == []  # nothing was cloned either time
