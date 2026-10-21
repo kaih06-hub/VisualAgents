@@ -198,7 +198,8 @@ def sets():
     from ground_truth_set2 import GT2
     from ground_truth_set3 import GT3
     from ground_truth_set4 import GT4
-    return {"set1": GT, "set2": GT2, "set3": GT3, "set4": GT4}
+    from ground_truth_set5 import GT5
+    return {"set1": GT, "set2": GT2, "set3": GT3, "set4": GT4, "set5": GT5}
 
 
 if __name__ == "__main__":

@@ -253,3 +253,133 @@ def test_an_agent_named_like_a_test_is_part_of_the_project(tmp_path):
         "review/test_analyzer.py": pytest_module,
     })
     assert "testrunner" in {a["id"].replace("_", "") for a in scan(tmp_path)["agents"]}
+
+
+# -- gaps found by the fifth README-graph set ----------------------------------------------------------------
+
+def test_a_big_notebook_with_shell_magics_is_read(tmp_path):
+    """Saved outputs make notebooks megabytes, and `!pip install` is not Python: neither hides the agents."""
+    import json
+
+    cells = [
+        {"cell_type": "code", "source": ["!pip install -q crewai\n", "%matplotlib inline\n"], "outputs": []},
+        {"cell_type": "code", "source": [
+            "from crewai import Agent, Task, Crew, Process\n",
+            "analyst = Agent(role='Research Analyst', goal='Analyse the paper', backstory='x')\n",
+            "writer = Agent(role='Academic Writer', goal='Write the report', backstory='x')\n",
+            "t1 = Task(description='analyse', expected_output='notes', agent=analyst)\n",
+            "t2 = Task(description='write', expected_output='report', agent=writer)\n",
+            "crew = Crew(agents=[analyst, writer], tasks=[t1, t2], process=Process.sequential)\n"],
+         "outputs": [{"output_type": "display_data", "data": {"image/png": "A" * 600_000}}]},
+        {"cell_type": "code", "source": ["%%bash\n", "echo not python\n"], "outputs": []},
+    ]
+    (tmp_path / "paper.ipynb").write_text(json.dumps({"cells": cells, "nbformat": 4, "nbformat_minor": 5}))
+    bp = scan(tmp_path)
+    assert ids(bp) == ["academic_writer", "research_analyst"]
+    assert ("research_analyst", "academic_writer") in edges(bp)
+
+
+def test_agents_built_by_factories_with_constant_names(tmp_path):
+    _write(tmp_path, {"team.py": (
+        "from smolagents import CodeAgent\n"
+        "WEB_NAME = 'web_researcher'\n"
+        "MEDIA_NAME = 'media_analyst'\n"
+        "def build_agent(model):\n"
+        "    return CodeAgent(tools=[], model=model, instructions='Solve the task')\n"
+        "def build_team(model):\n"
+        "    team = []\n"
+        "    team.append(CodeAgent(tools=[], model=model, name=WEB_NAME, description='searches'))\n"
+        "    team.append(CodeAgent(tools=[], model=model, name=MEDIA_NAME, description='reads media'))\n"
+        "    return CodeAgent(tools=[], model=model, managed_agents=team, instructions='Lead the team')\n"),
+        "registry.py": (
+            "from agents_lib import ResearchAgent\n"
+            "def create_agent(name, registry):\n"
+            "    return registry.create_agent(name)  # a generic registry: no agent of its own\n"
+            "def make_researcher(llm):\n"
+            "    return ResearchAgent(llm=llm, cache=None)  # the project's own class, not a framework agent\n"),
+    })
+    bp = scan(tmp_path)
+    assert {"build_agent", "build_team", "web_researcher", "media_analyst"} <= set(ids(bp))
+    assert "create_agent" not in ids(bp) and "make_researcher" not in ids(bp)
+    assert {("build_team", "web_researcher"), ("build_team", "media_analyst")} <= edges(bp)
+
+
+def test_delegation_through_tool_functions_and_run_helpers(tmp_path):
+    _write(tmp_path, {
+        "helpers.py": "async def run_agent(agent, prompt):\n    return await agent.run(prompt)\n",
+        "team.py": (
+            "from pydantic_ai import Agent\n"
+            "from helpers import run_agent\n"
+            "def register(agent, tools):\n"
+            "    for t in tools:\n"
+            "        agent.tool_plain(t)\n"
+            "def build():\n"
+            "    research = Agent('openai:gpt-5', name='research_agent', instructions='Research')\n"
+            "    math = Agent('openai:gpt-5', name='math_agent', instructions='Do maths')\n"
+            "    critic = Agent('openai:gpt-5', name='critic_agent', instructions='Check the answer')\n"
+            "    supervisor = Agent('openai:gpt-5', name='supervisor_agent', instructions='Delegate')\n"
+            "    async def ask_research(q):\n"
+            "        return await run_agent(agent=research, prompt=q)\n"
+            "    async def ask_math(q):\n"
+            "        return await math.run(q)\n"
+            "    async def check(answer):\n"
+            "        return await critic.run(answer)\n"
+            "    register(supervisor, [ask_research, ask_math])\n"
+            "    supervisor.validate = check\n"
+            "    return supervisor\n"),
+    })
+    assert {("supervisor_agent", "research_agent"), ("supervisor_agent", "math_agent"),
+            ("supervisor_agent", "critic_agent")} <= edges(scan(tmp_path))
+
+
+def test_a_hierarchical_crew_with_members_built_in_a_method(tmp_path):
+    _write(tmp_path, {"crew.py": (
+        "from crewai import Agent, Crew, Process\n"
+        "class SalesCrew:\n"
+        "    def __init__(self, cfg):\n"
+        "        self.cfg = cfg\n"
+        "        self.manager = Agent(role='Sales Manager', goal='g', backstory='b')\n"
+        "        self.agents = self._build_agents()\n"
+        "    def _build_agents(self):\n"
+        "        agents = {}\n"
+        "        agents['lead_finder'] = Agent(role=self.cfg['lead_finder'], goal='g', backstory='b')\n"
+        "        agents['email_writer'] = Agent(role=self.cfg['email_writer'], goal='g', backstory='b')\n"
+        "        return agents\n"
+        "    def crew(self):\n"
+        "        workers = list(self.agents.values())\n"
+        "        mode = Process.hierarchical\n"
+        "        return Crew(agents=workers, tasks=[], process=mode, manager_agent=self.manager)\n"),
+        "agents.yaml": "lead_finder:\n  role: Lead Finder\nemail_writer:\n  role: Email Writer\n",
+    })
+    assert {("sales_manager", "lead_finder"), ("sales_manager", "email_writer")} <= edges(scan(tmp_path))
+
+
+def test_a_dspy_program_running_three_predictors_is_drawn_as_steps(tmp_path):
+    _write(tmp_path, {"rag.py": (
+        "import dspy\n"
+        "class InputGuard(dspy.Signature):\n    'Block unsafe questions.'\n"
+        "class Answer(dspy.Signature):\n    'Answer from the context.'\n"
+        "class OutputGuard(dspy.Signature):\n    'Block unsupported answers.'\n"
+        "class SafeRAG(dspy.Module):\n"
+        "    def __init__(self):\n"
+        "        self.input_guard = dspy.Predict(InputGuard)\n"
+        "        self.answer = dspy.ChainOfThought(Answer)\n"
+        "        self.output_guard = dspy.Predict(OutputGuard)\n"
+        "    def forward(self, question):\n"
+        "        if self.input_guard(question=question).blocked:\n"
+        "            return None\n"
+        "        reply = self.answer(question=question)\n"
+        "        return self.output_guard(answer=reply.answer)\n"
+        "rag = SafeRAG()\n"),
+        "summary.py": (
+            "import dspy\n"
+            "class Summarize(dspy.Module):\n"
+            "    def __init__(self):\n"
+            "        self.draft = dspy.ChainOfThought('text -> summary')\n"
+            "    def forward(self, text):\n"
+            "        return self.draft(text=text)\n"
+            "s = Summarize()\n"),
+    })
+    bp = scan(tmp_path)
+    assert {"input_guard", "answer", "output_guard", "summarize"} <= set(ids(bp))  # one predictor: one agent
+    assert {("input_guard", "answer"), ("answer", "output_guard")} <= edges(bp)
