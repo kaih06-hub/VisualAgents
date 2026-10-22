@@ -3,6 +3,30 @@
 ## Unreleased
 
 ### Fixed
+- Seven gaps found by a sixth check of ten projects against their README graphs (no rule names a project):
+  - LangGraph routes added in a loop (`for n in ("bull", "bear"): add_conditional_edges(n, route, PATH_MAP)`) with the
+    path map kept in a constant, and nodes named from a table of records (`for s in SPECS: add_node(s.agent_node, ...)`,
+    `add_edge([s.agent_node for s in SPECS], "next")`);
+  - a graph a function builds afresh for each of several nodes (each analyst's own model + tools loop) is those nodes'
+    machinery and leaves the map; built by a function for one node only, it is linked as a subgraph;
+  - ADK `AgentTool(agent)` / `AgentTool(agent=...)` in an agent's `tools=` hands work to that agent;
+  - a callback or guardrail given to an agent that asks a model itself (`after_agent_callback=llm_judge`) is an agent
+    checking that one's work;
+  - project agent classes run by an orchestrator class through their own model-calling methods
+    (`self.critic.check_task_success()`, inherited `self.phd.inference()`, a project helper such as `query_model()`,
+    or the agent's model called from outside: `self.action_agent.llm(messages)`), in the order the code runs them; a
+    retry loop (`while`, `for _ in range(n)`) comes back to its first agent; LangChain chat models called directly
+    (`llm(messages)`) are model calls;
+  - other model-calling parts an orchestrator builds beside its agents (`self.skill_manager = SkillManager()`,
+    `solver = MLESolver(...)`) are agents too;
+  - agents written as records (`AgentConfig(name=..., system_prompt=...)`) are routed by the project's one
+    orchestrator / router / triage step, which stands in for the object that runs it; agent variants built per mode
+    (`CodeInterpreterCLIOnly`, `...PluginOnly`) join the plain one; roles that never name each other answer to the one
+    planner / orchestrator / supervisor among them; `tutorial` folders count as examples.
+- `benchmarks/readme_graphs`: a sixth set of ten (`ground_truth_set6.py`, `run_set6.sh`, `score.py <out> set6`);
+  sets 1-6 on main and dev-refinement in `results-set6-2026-10-22.json`.
+
+### Fixed (earlier)
 - Five gaps found by a fifth check of ten projects against their README graphs (no rule names a project):
   - notebooks are measured by their code, not their saved outputs, and `!pip install` / `%magic` lines no longer
     stop a notebook from being read;

@@ -104,6 +104,12 @@ class _Collector:
         self.edge_tables: set[tuple[str, str]] = set()  # add_edge(e["from"], e["to"]): the keys of its edge dicts
         self.group_chats: list[dict[str, Any]] = []  # members and speaker selection of each group chat
         self.humans: set[str] = set()  # agents that stand for the person (UserProxyAgent, a group chat's admin)
+        self.builder_nodes: dict[str, set[str]] = {}  # "file:builder" -> the nodes added to it
+        self.templates: dict[str, set[str]] = {}  # "file:builder" built by a function per node -> those outer nodes
+        self.llm_methods: dict[str, set[str]] = {}  # project class -> its methods that reach a model
+        self.llm_functions: set[str] = set()  # the project's module-level functions that reach a model
+        self.callbacks: list[tuple[str, str, str]] = []  # (agent, function, callback keyword) given to an agent
+        self.record_agents: list[str] = []  # agents written as data records: AgentConfig(name=..., system_prompt=...)
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -223,6 +229,86 @@ def _list_refs(node: ast.AST | None) -> list[str]:
         return _list_refs(node.elt) if not isinstance(node.elt, ast.Call) else _send_targets(node.elt)
     r = _ref(node)
     return [r] if r else []
+
+
+_AGENT_TOOL = re.compile(r"(^|_)?Agent_?Tool$|^agent_?tool$|^AgentAsTool$", re.I)
+
+
+def _agent_tool_target(elt: ast.AST) -> str | None:
+    """AgentTool(agent=writer) / AgentTool(writer): a tool that runs another agent - that agent's name."""
+    if not isinstance(elt, ast.Call) or not _AGENT_TOOL.search(_call_name(elt) or ""):
+        return None
+    arg = _kw(elt, "agent") or (elt.args[0] if elt.args else None)
+    return _ref(arg) if isinstance(arg, (ast.Name, ast.Attribute)) else None
+
+
+_RECORD_CLS = re.compile(r"Agent(Config|Spec|Definition|Def|Settings|Profile|Card)$|^(Agent|Role)(Config|Spec)")
+_PROMPT_KWARGS = ("system_prompt", "instructions", "instruction", "system_message", "prompt", "persona")
+_HUB = re.compile(r"(^|_)(orchestrat\w*|router|route|supervis\w*|dispatch\w*|triage|concierge|coordinat\w*)($|_)", re.I)
+
+
+def _agent_record(cls: str, call: ast.Call) -> str | None:
+    """The name of an agent described as a record - AgentConfig(name="Billing", system_prompt="You ...") - or None."""
+    if not cls or not _RECORD_CLS.search(cls) or cls in AGENT_CLASSES:
+        return None
+    name = _lit(_kw(call, "name", "agent_name"))
+    return name if name and _kw(call, *_PROMPT_KWARGS) is not None else None
+
+
+def _record_hub(c: _Collector) -> None:
+    """Agents written as records are run by the code that picks among them: a project function or method named as
+    an orchestrator / router / supervisor / dispatcher / triage step. It hands each its turn and gets the user back."""
+    recs = [r for r in dict.fromkeys(c.record_agents) if bpmod.norm_key(r) in c.agents]
+    if len(recs) < 2:
+        return
+    keys = {bpmod.norm_key(r) for r in recs}
+    if any(bpmod.norm_key(e["from"]) in keys or bpmod.norm_key(e["to"]) in keys for e in c.edges):
+        return
+    found: dict[str, set[str]] = {}  # hub function -> the classes it is a method of
+    for rel, t in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for cls in [None, *(n for n in ast.walk(t) if isinstance(n, ast.ClassDef))]:
+            for n in (cls.body if cls is not None else t.body):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and _HUB.search(n.name) \
+                        and not n.name.startswith("test"):
+                    found.setdefault(n.name, set()).update([cls.name] if cls is not None else [])
+    if len(found) != 1:
+        return
+    hub, owners = next(iter(found.items()))
+    for cls in owners:  # workflow = ConciergeAgent(...): the object that runs the hub is the hub, not another agent
+        for var in c.instances.get(cls, ()):
+            a = c.agents.get(bpmod.norm_key(var))
+            if a is not None and set(a["aliases"]) <= {var, cls}:
+                del c.agents[bpmod.norm_key(var)]
+    if bpmod.norm_key(hub) not in c.agents:
+        c.add_agent(hub, file="", line=0, role="Picks which agent handles the request")
+    for r in recs:
+        c.edges.append({"from": hub, "to": r, "label": "routes", "conditional": True})
+        c.edges.append({"from": r, "to": hub, "label": "hands back", "conditional": True})
+    c.entry.append(hub)
+
+
+_LEAD = re.compile(r"(^|_)(planner|orchestrator|supervisor|manager|coordinator|dispatcher|router|leader|boss|chief)($|_)")
+
+
+def _lone_hub(c: _Collector) -> None:
+    """Roles that never name each other in code (a framework session passes their messages) still answer to the one
+    role that plans the work: with no edges at all and exactly one planner / orchestrator / supervisor among three or
+    more agents, it hands work to each and gets the results back."""
+    if c.edges or len(c.agents) < 3:
+        return
+    leads = [k for k in c.agents if _LEAD.search(k)]
+    if len(leads) != 1:
+        return
+    hub = c.agents[leads[0]]["name"]
+    for k, a in c.agents.items():
+        if k != leads[0]:
+            c.edges.append({"from": hub, "to": a["name"], "label": "assigns", "conditional": True})
+            c.edges.append({"from": a["name"], "to": hub, "label": "reports", "conditional": True})
+    c.entry = [hub]
+    c.exits = [hub]
+    c.on_their_own = set()
 
 
 def _send_targets(node: ast.AST) -> list[str]:
@@ -417,7 +503,12 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 c.vote("langgraph")
             first = node.args[0] if node.args else _kw(node, "node")
             second = node.args[1] if len(node.args) > 1 else _kw(node, "action")
-            for node_name, fn_name in _node_names(first, second, node, parents, tree, c):
+            made = _node_names(first, second, node, parents, tree, c)
+            c.builder_nodes.setdefault(f"{src.rel}:{_ref(node.func.value) or ''}", set()).update(n for n, _ in made)
+            tmpl = _template_builder(second, tree, src.rel)
+            if tmpl:  # add_node(name, _analyst_graph(spec, ...)): a function that builds and compiles a graph per node
+                c.templates.setdefault(tmpl, set()).update(n for n, _ in made)
+            for node_name, fn_name in made:
                 aliases = [fn_name] if fn_name and fn_name != node_name else []
                 ag = c.add_agent(node_name, file=src.rel, line=node.lineno, aliases=aliases)
                 c.graph_nodes[node_name] = ag
@@ -445,24 +536,26 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             c.edge_tables.add((_subscript_key(node.args[0]), _subscript_key(node.args[1])))
             continue
         if name == "add_edge" and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
-            srcs = _loop_values(node.args[0], node, parents) or (
-                _list_refs(node.args[0]) if isinstance(node.args[0], (ast.List, ast.Tuple)) else [_ref(node.args[0])])
-            dsts = _loop_values(node.args[1], node, parents) or [_ref(node.args[1])]
+            srcs = _node_refs(node.args[0], node, parents, tree, c)
+            dsts = _node_refs(node.args[1], node, parents, tree, c)
             for a in srcs:
                 for b in dsts:
                     if a and b:
                         c.edge(a, b)
             continue
         if name == "add_conditional_edges" and node.args:
-            srcn = _ref(node.args[0])
+            srcs = _node_refs(node.args[0], node, parents, tree, c)
             pm = node.args[2] if len(node.args) > 2 else _kw(node, "path_map")
             router = _ref(node.args[1]) if len(node.args) > 1 else None
+            if isinstance(pm, ast.Name):  # a path map kept in a constant: add_conditional_edges(n, route, PATH_MAP)
+                pm = _assigned_value(pm, node, parents, tree) or _module_value(pm.id, tree) or pm
             targets_ = _list_refs(pm) if pm is not None else []
             if not targets_ and router and router in c.functions:
                 targets_ = _returned_strings(c.functions[router])
             for t in targets_:
-                if srcn:
-                    c.edge(srcn, t, label=router or "", conditional=True)
+                for srcn in srcs:
+                    if srcn:
+                        c.edge(srcn, t, label=router or "", conditional=True)
             continue
         if name in {"set_entry_point", "set_finish_point"} and node.args:
             r = _ref(node.args[0])
@@ -478,7 +571,10 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             continue
 
         # -- agent constructors ------------------------------------------
-        if name in AGENT_CLASSES or name in AGENT_FACTORIES or (name.endswith("Agent") and node.keywords):
+        record = _agent_record(name, node)
+        if record:  # AgentConfig(name="Stock Lookup Agent", system_prompt=..., tools=...): an agent written as data
+            c.record_agents.append(record)
+        if name in AGENT_CLASSES or name in AGENT_FACTORIES or (name.endswith("Agent") and node.keywords) or record:
             if name in {"create_handoff_tool"}:
                 continue
             own = c.own_defs.get(name) if isinstance(node.func, ast.Name) else None
@@ -519,11 +615,20 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                                     "conditional": True})
             if tools_node is not None and isinstance(tools_node, (ast.List, ast.Tuple)):
                 for elt in tools_node.elts:
+                    wrapped = _agent_tool_target(elt)
+                    if wrapped:  # ADK AgentTool(agent=x) / AgentTool(x): the agent is called as a tool
+                        c.edges.append({"from": agent_name, "to": wrapped, "label": "as tool", "conditional": True})
+                        ag["tools"] = [x for x in ag["tools"] if x != _call_name(elt)]
+                        continue
                     if isinstance(elt, ast.Call) and isinstance(elt.func, ast.Attribute) and elt.func.attr == "as_tool":
                         r = _ref(elt.func.value)
                         if r:
                             c.edges.append({"from": agent_name, "to": r, "label": "as tool", "conditional": True})
                             ag["tools"] = [x for x in ag["tools"] if x != r]
+            for k in node.keywords:  # after_agent_callback=llm_judge_gate, output_guardrails=[check]
+                if k.arg and _CALLBACK_KW.search(k.arg):
+                    for fn_name in _list_refs(k.value) if isinstance(k.value, (ast.Name, ast.List, ast.Tuple)) else []:
+                        c.callbacks.append((agent_name, fn_name, k.arg))
             for kw in HANDOFF_KWARGS:
                 sub = _kw(node, kw)
                 if sub is None or (kw == "agents" and name not in {"AgentWorkflow"}):
@@ -688,6 +793,78 @@ def _loop_values(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST]) -
     return []
 
 
+def _module_value(name: str, tree: ast.AST) -> ast.AST | None:
+    """What a module-level name is set to: PATH_MAP = {...}."""
+    for st in getattr(tree, "body", []):
+        if isinstance(st, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in st.targets):
+            return st.value
+        if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id == name:
+            return st.value
+    return None
+
+
+def _loop_of(var: str, node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.For | None:
+    cur = parents.get(node)
+    while cur is not None:
+        if isinstance(cur, (ast.For, ast.AsyncFor)) and isinstance(cur.target, ast.Name) and cur.target.id == var:
+            return cur
+        if isinstance(cur, (ast.ListComp, ast.GeneratorExp, ast.SetComp)) and any(
+                isinstance(g.target, ast.Name) and g.target.id == var for g in cur.generators):
+            return cur
+        cur = parents.get(cur)
+    return None
+
+
+def _record_values(field: str, c: Any) -> list[str]:
+    """The node names a table of records gives a field: AnalystSpec(key="market", agent_node="Market Analyst"), ...
+    - the literal values of `field=` in the constructor calls of the one class that sets it most often (two or more)."""
+    by_cls: dict[str, list[str]] = {}
+    for rel, t in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for n in ast.walk(t):
+            if isinstance(n, ast.Call):
+                v = _lit(_kw(n, field))
+                if v and "{" not in v:
+                    by_cls.setdefault(_call_name(n), []).append(v)
+    if not by_cls:
+        return []
+    vals = max(by_cls.values(), key=len)
+    return list(dict.fromkeys(vals)) if len(vals) >= 2 else []
+
+
+def _node_refs(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST, c: Any,
+               depth: int = 0) -> list[str]:
+    """The node names an add_edge / add_conditional_edges argument stands for: a literal, a list of them, a loop
+    variable over either, a list built from a table of records ([s.agent_node for s in specs]) - otherwise its name."""
+    if depth > 3:
+        return []
+    if isinstance(arg, (ast.List, ast.Tuple)):
+        return [r for e in arg.elts for r in _node_refs(e, node, parents, tree, c, depth + 1)]
+    if isinstance(arg, (ast.ListComp, ast.GeneratorExp)) and isinstance(arg.elt, ast.Attribute) and \
+            isinstance(arg.elt.value, ast.Name):
+        return _record_values(arg.elt.attr, c)
+    if isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name) and _loop_of(arg.value.id, node, parents):
+        return _record_values(arg.attr, c)
+    if isinstance(arg, ast.Name) and _lit(arg) is None:
+        looped = _loop_values(arg, node, parents)
+        if looped:
+            return looped
+        loop = _loop_of(arg.id, node, parents)
+        it = loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else None
+        if isinstance(it, ast.Name):  # for n in first_steps: ... with first_steps built above
+            value = _assigned_value(it, node, parents, tree)
+            if value is not None:
+                return _node_refs(value, node, parents, tree, c, depth + 1)
+        value = _assigned_value(arg, node, parents, tree)
+        if isinstance(value, (ast.List, ast.Tuple, ast.ListComp)):
+            got = _node_refs(value, node, parents, tree, c, depth + 1)
+            if got:
+                return got
+    r = _ref(arg)
+    return [r] if r else []
+
+
 def _node_names(first: ast.AST | None, second: ast.AST | None, node: ast.AST, parents: dict[ast.AST, ast.AST],
                 tree: ast.AST, c: Any) -> list[tuple[str, str | None]]:
     """(node name, action name) for one add_node call. A name held in a variable is never the node's name: it is
@@ -713,6 +890,11 @@ def _node_names(first: ast.AST | None, second: ast.AST | None, node: ast.AST, pa
         const = _const_value(first.id, tree)
         if const:
             return [(const, action)]
+    if isinstance(first, ast.Attribute) and isinstance(first.value, ast.Name) and \
+            _loop_of(first.value.id, node, parents):  # for spec in specs: add_node(spec.agent_node, ...)
+        recs = _record_values(first.attr, c)
+        if recs:
+            return [(v, action) for v in recs]
     table = _node_table(second, node, parents, tree)
     if table:
         return table
@@ -1258,6 +1440,41 @@ def _message_routes(files: list[SourceFile], c: _Collector) -> None:
             c.entry.append(c.agents[by_class[b]]["name"])
 
 
+def _template_builder(action: ast.AST | None, tree: ast.AST, rel: str) -> str | None:
+    """`_analyst_graph(spec, agent)` where the module's function builds a graph and returns `graph.compile()`:
+    the builder, as "file:variable"."""
+    if not (isinstance(action, ast.Call) and isinstance(action.func, ast.Name)):
+        return None
+    fn = next((st for st in getattr(tree, "body", []) if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and st.name == action.func.id), None)
+    for r in (n for n in ast.walk(fn) if isinstance(n, ast.Return)) if fn is not None else []:
+        v = r.value
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "compile" and \
+                isinstance(v.func.value, ast.Name):
+            return f"{rel}:{v.func.value.id}"
+    return None
+
+
+def _fold_template_graphs(c: _Collector) -> None:
+    """A graph a function builds afresh for each of several nodes (each analyst's own model + tools loop) is those
+    nodes' private machinery: its inner nodes leave the map. Built for one node only, it is a subgraph like any other."""
+    for builder, outer in c.templates.items():
+        if len(outer) < 2:
+            for o in outer:
+                c.subgraphs.append((o, builder))
+            continue
+        inner = c.builder_nodes.get(builder, set()) - outer
+        for n in inner:
+            ag = c.graph_nodes.pop(n, None)
+            key = bpmod.norm_key(n)
+            if ag is not None and c.agents.get(key) is ag:
+                del c.agents[key]
+        c.edges = [e for e in c.edges if e["from"] not in inner and e["to"] not in inner]
+        c.entry = [e for e in c.entry if e not in inner]
+        c.exits = [x for x in c.exits if x not in inner]
+        c.builder_ends.pop(builder, None)
+
+
 def _link_subgraphs(c: _Collector) -> None:
     """A node that runs a whole compiled graph hands work to that graph's entry nodes and gets it back from its exit
     nodes; the inner graph's own start and end are not where a run starts or ends."""
@@ -1451,7 +1668,7 @@ def _named_instances(files: list[SourceFile], c: _Collector) -> None:
     (a.ask(); b.ask(); judge.ask() inside a loop) is how work passes between them."""
     defs, _ = _cached_defs(files, c)
     bases = {d.name: [b.split(".")[-1] for b in d.bases] for d in defs}
-    asking = call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files])
+    asking = c.llm_methods or call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files])
 
     def methods(cls: str, seen: frozenset = frozenset()) -> set[str]:
         out = set(asking.get(cls, ()))
@@ -1738,6 +1955,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     c.file = None
     _edge_tables(c)
     _group_chat_turns(c)
+    _fold_template_graphs(c)
 
     # tasks from YAML fill in CrewAI steps that were declared via config keys
     yaml_tasks = dict(c.yaml_tasks)
@@ -1794,6 +2012,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
             c.entry.append(seq[0])
             c.exits.append(seq[-1])
 
+    c.llm_methods = call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files], c.llm_functions)
+    _model_callbacks(c)
     _scan_classes(files, c)
     _split_pipeline_classes(c, files)
     _fold_into_nodes(c, files)
@@ -1801,6 +2021,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     _link_subgraphs(c)
     _named_instances(files, c)
     _message_routes(files, c)
+    _companion_agents(c)
+    _record_hub(c)
     run_order.link(c)
     _tool_delegation(c)
 
@@ -1851,6 +2073,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
 
     _drop_example_agents(c)
     _drop_separate_programs(c)
+    _merge_mode_variants(c)
+    _lone_hub(c)
 
     if facts is not None:
         found = (("ports", _ports(c)), ("config_lists", _config_lists(c, files)), ("factories", _factories(c)),
@@ -1878,6 +2102,85 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
 _RUNS = {"run", "run_sync", "run_stream", "iter", "arun", "ainvoke", "invoke", "kickoff", "kickoff_async"}
 _TOOL_KWARGS = ("tools", "extra_tools", "functions", "toolsets")
 _ATTACH_DECORATORS = {"tool", "tool_plain", "output_validator", "result_validator"}
+
+
+_MODE_WORDS = {"cli", "only", "clionly", "plugin", "plugins", "pluginonly", "lite", "mini", "async", "sync", "stream",
+               "streaming", "local", "remote", "legacy", "old", "new", "v1", "v2", "v3", "simple", "basic", "fast",
+               "mock", "dummy", "offline", "online", "web", "api", "gui", "headless", "no", "with", "without", "tools",
+               "tool", "code"}
+
+
+def _merge_mode_variants(c: _Collector) -> None:
+    """CodeInterpreterCLIOnly / CodeInterpreterPluginOnly beside CodeInterpreter are one agent built for different
+    modes: the variants join the plain one (their names add only mode words to it)."""
+    graph = {id(a) for a in c.graph_nodes.values()}
+    slug = {k: bpmod.slugify(a["name"]).replace("-", "_") for k, a in c.agents.items()}
+    for base in sorted(slug, key=lambda k: len(slug[k])):
+        if base not in c.agents or id(c.agents[base]) in graph:
+            continue
+        for k in [k for k in list(c.agents) if k != base and slug[k].startswith(slug[base] + "_")]:
+            rest = [w for w in slug[k][len(slug[base]) + 1:].split("_") if w]
+            if not rest or not all(w in _MODE_WORDS for w in rest) or id(c.agents[k]) in graph:
+                continue
+            a, b = c.agents[base], c.agents.pop(k)
+            for n in [b["name"], *b["aliases"]]:
+                if n not in a["aliases"]:
+                    a["aliases"].append(n)
+            a["tools"] += [t for t in b["tools"] if t not in a["tools"]]
+            for e in c.edges:  # its arrows are the plain one's now
+                e["from"] = a["name"] if bpmod.norm_key(e["from"]) in {k, *map(bpmod.norm_key, b["aliases"])} else e["from"]
+                e["to"] = a["name"] if bpmod.norm_key(e["to"]) in {k, *map(bpmod.norm_key, b["aliases"])} else e["to"]
+
+
+_CALLBACK_KW = re.compile(r"callbacks?$|guardrails?$|validators?$|^(before|after)_", re.I)
+
+
+def _model_callbacks(c: _Collector) -> None:
+    """A callback or guardrail given to an agent that asks a model itself (an LLM-as-judge gate run after the agent,
+    an input check run before it) is an agent of its own, checking that one's work."""
+    for agent, fn, kw in c.callbacks:
+        if fn not in c.llm_functions or bpmod.norm_key(agent) not in c.agents:
+            continue
+        if bpmod.norm_key(fn) not in c.agents:
+            c.add_agent(fn, file="", line=0, role="Checks the agent's work with a model")
+        before = kw.lower().startswith(("before", "input"))
+        c.edges.append({"from": fn if before else agent, "to": agent if before else fn,
+                        "label": "checks", "conditional": False})
+        if not before:
+            c.edges.append({"from": fn, "to": agent, "label": "verdict", "conditional": True})
+
+
+def _companion_agents(c: _Collector) -> None:
+    """A class that runs two or more of the agents also runs the other model-calling parts it builds beside them
+    (self.skill_manager = SkillManager(...) next to self.action_agent, or solver = MLESolver(...) in one of its
+    methods): those are agents too, named after the attribute, or after the class for a local variable."""
+    if len(c.agents) < 2 or not c.llm_methods:
+        return
+    known = {n for k, a in c.agents.items() for n in (k, a["name"], *a["aliases"])}
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            held, extra = 0, []
+            for st in ast.walk(cls):
+                if not (isinstance(st, ast.Assign) and isinstance(st.value, ast.Call)):
+                    continue
+                ctor = _call_name(st.value)
+                for t in st.targets:
+                    attr = t.attr if isinstance(t, ast.Attribute) and _ref(t.value) == "self" else None
+                    var = attr or (t.id if isinstance(t, ast.Name) else None)
+                    if not var:
+                        continue
+                    if (attr and attr in known) or ctor in known:
+                        held += 1
+                    elif ctor in c.llm_methods and ctor != cls.name:
+                        extra.append((attr or ctor, ctor, var, st.lineno))
+            if held < 2:
+                continue
+            for name, ctor, var, line in extra:
+                if bpmod.norm_key(name) not in c.agents:
+                    c.add_agent(name, file=rel, line=line, aliases=list(dict.fromkeys([ctor, var])))
+                    known |= {name, ctor, var}
 
 
 def _tool_delegation(c: _Collector) -> None:
@@ -2087,7 +2390,8 @@ def _drop_separate_programs(c: _Collector) -> None:
             del c.agents[k]
 
 
-EXAMPLE_DIRS = re.compile(r"(^|/)(examples?|samples?|demos?|cookbooks?)(/|$)", re.I)
+EXAMPLE_DIRS = re.compile(r"(^|/)(examples?|samples?|demos?|cookbooks?|tutorials?|[\w\-]*tutorial[\w\-]*|walkthroughs?)(/|$)",
+                          re.I)
 
 
 def _drop_example_agents(c: _Collector) -> None:

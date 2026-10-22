@@ -23,6 +23,8 @@ PASSED_TO = {"run", "run_sync", "run_streamed", "arun", "invoke", "ainvoke", "st
 SAME_AGENT = {"clone", "copy", "with_config", "with_options", "bind", "bind_tools", "with_structured_output",
               "with_retry", "with_fallbacks"}
 CHATS = {"initiate_chat", "a_initiate_chat"}
+# an agent's own model, called from outside it: self.action_agent.llm(messages)
+MODEL_ATTR = __import__("re").compile(r"^_?(llm|lm|model|chat_model|chat_llm|client)$")
 MAX_DEPTH = 6
 BUDGET = 40_000  # calls looked at, per project
 MAX_EDGES = 40
@@ -79,6 +81,28 @@ def link(c: Any) -> None:
                 for t in node.targets:
                     if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self":
                         attr_cls.setdefault(t.attr, set()).add(node.value.func.id)
+    bases: dict[str, list[str]] = {}  # project class -> the names of its bases
+    for tree in c.trees.values():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                bases.setdefault(node.name, []).extend(
+                    b.id if isinstance(b, ast.Name) else b.attr for b in node.bases if isinstance(b, (ast.Name, ast.Attribute)))
+    asks = getattr(c, "llm_methods", {}) or {}
+
+    def asks_model(cls: str | None, method: str, seen: frozenset = frozenset()) -> bool:
+        """Does `cls.method` (its own or inherited) reach a model?"""
+        if not cls or cls in seen or (cls, method) in seen:
+            return False
+        if method in asks.get(cls, ()):
+            return True
+        own = methods.get((cls, method))
+        if own is not None:  # its own method: asks through another one it calls, inherited or not (self.inference())
+            return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                       and n.func.value.id == "self" and n.func.attr != method
+                       and asks_model(cls, n.func.attr, seen | {(cls, method)})
+                       for n in ast.walk(own.node))
+        return any(asks_model(b, method, seen | {cls}) for b in bases.get(cls, ()))
+
     project_classes = {cls for cls, _ in methods}
     attr_any = {a: next(iter(ks)) for a, ks in attr_cls.items() if len(ks) == 1}
     attr_cls = {a: k for a, k in attr_any.items() if k in project_classes}
@@ -215,6 +239,16 @@ def link(c: Any) -> None:
                 a = agent_of(arg, env, fn)
                 return [a] if a else []
             return []
+        # a project agent class asked through one of its own model-calling methods: self.critic.check_task_success(),
+        # solver.solve() with solver = MLESolver(...) - or through its model: self.action_agent.llm(messages)
+        if isinstance(f, ast.Attribute) and isinstance(f.value, (ast.Attribute, ast.Name)):
+            owner_cls = attr_any.get(f.value.attr) if isinstance(f.value, ast.Attribute) and \
+                isinstance(f.value.value, ast.Name) and f.value.value.id == "self" else \
+                local_cls(fn, f.value.id) if isinstance(f.value, ast.Name) else None
+            if owner_cls and (asks_model(owner_cls, f.attr) or MODEL_ATTR.match(f.attr)):
+                me = agent_of(f.value, env, fn)
+                if me:
+                    return [me]
         if isinstance(f, ast.Attribute) and f.attr == "register_nested_chats":
             me = agent_of(f.value, env, fn)
             chats = call.args[0] if call.args else None
@@ -236,6 +270,20 @@ def link(c: Any) -> None:
             a = agent_of(f, env, fn)
             return [a] if a else []
         return []
+
+    ctor_of: dict[int, dict[str, str]] = {}
+
+    def local_cls(fn: _Fn, var: str) -> str | None:
+        """The project class a local variable was built from: solver = MLESolver(...)."""
+        k = id(fn.node)
+        if k not in ctor_of:
+            ctor_of[k] = {}
+            for st in ast.walk(fn.node):
+                if isinstance(st, ast.Assign) and isinstance(st.value, ast.Call) and isinstance(st.value.func, ast.Name):
+                    for t in st.targets:
+                        if isinstance(t, ast.Name):
+                            ctor_of[k][t.id] = st.value.func.id
+        return ctor_of[k].get(var)
 
     memo: dict[tuple[int, frozenset], set[str]] = {}
     reach: set[int] = set()  # functions that run an agent, themselves or through what they call
@@ -293,6 +341,11 @@ def link(c: Any) -> None:
                 loop = {"ret": ctl["ret"], "brk": None}
                 # a loop over planned items runs its body: what ran last is what the body ran last
                 body = walk(st.body, set(frontier), fn, depth, stack, env, tools_env, loop)
+                ran = (body or set()) - set(frontier)  # agents this round ran last (not ones it skipped past)
+                if _repeats(st) and ran:  # the next round starts after this one's last agent
+                    again = {"ret": loop["ret"], "brk": loop["brk"], "cont": loop.get("cont")}
+                    body = _join(body, walk(st.body, ran, fn, depth, stack, env, tools_env, again))
+                    loop.update(again)
                 ctl["ret"] = loop["ret"]
                 frontier = _join(_join(body, loop["brk"]), loop.get("cont"))  # `continue` ends a pass too
                 if st.orelse and frontier is not None:
@@ -389,6 +442,14 @@ def link(c: Any) -> None:
             break
         walk_fn(fn, set(), 0, frozenset())
     c.edges += edges
+
+
+def _repeats(st: ast.AST) -> bool:
+    """A loop that runs the same work again (`while ...`, `for _ in range(n)`), not one pass over planned items."""
+    if isinstance(st, ast.While):
+        return True
+    it = getattr(st, "iter", None)
+    return isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
 
 
 def _join(a: set[str] | None, b: set[str] | None) -> set[str] | None:

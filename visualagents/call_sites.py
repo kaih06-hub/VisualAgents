@@ -700,12 +700,16 @@ def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=F
             continue
         var = parts[1] if root == "self" and len(parts) > 1 else root
         origin = clients.get(var)
-        if origin and ((len(parts) == (2 if root == "self" else 1) and origin in ("pipeline", "Llama", "LLM"))
+        if origin and ((len(parts) == (2 if root == "self" else 1) and (origin in ("pipeline", "Llama", "LLM") or _CHAT_MODEL.match(origin)))
                        or (len(parts) > 1 and last in LLM_USE)):
             weak = weak or (f"{origin}.{last}" if last != var else origin)
     if weak and not _embeds(node):
         return weak
     return "" if weak else _http_llm_call(node)
+
+
+# LangChain chat models are callable: llm(messages) on ChatOpenAI / AzureChatOpenAI / ChatAnthropic runs the model
+_CHAT_MODEL = re.compile(r"^(Azure)?Chat[A-Z]")
 
 
 _EMBED_CALLS = re.compile(r"(^|\.)(embeddings?\.create|Embedding\.create|embed|embed_content|embed_documents|embed_query|"
@@ -978,10 +982,18 @@ def _picks_prompt(fn: _Fn, ups: list[_Fn]) -> bool:
     return sum(1 for x in chosen if x) >= 2 and len({x for x in chosen if x}) >= 2
 
 
-def class_llm_methods(files: list[SourceFile]) -> dict[str, set[str]]:
-    """class name -> its methods that reach a model, directly or through another method of the class
-    (ask() -> self.query() -> openai...). Inherited methods are the caller's to resolve."""
-    out: dict[str, set[str]] = {}
+def llm_functions(files: list[SourceFile]) -> set[str]:
+    """Names of the project's module-level functions that reach a model, directly or through each other."""
+    out: set[str] = set()
+    class_llm_methods(files, out)
+    return out
+
+
+def class_llm_methods(files: list[SourceFile], functions_out: set[str] | None = None) -> dict[str, set[str]]:
+    """class name -> its methods that reach a model, directly, through another method of the class
+    (ask() -> self.query() -> openai...) or through one of the project's own model-calling functions
+    (inference() -> query_model(...) -> openai...). Inherited methods are the caller's to resolve."""
+    parsed = []
     for f in files:
         if f.path.suffix.lower() not in (".py", ".ipynb") or is_test_file(f.rel, f.text):
             continue
@@ -992,10 +1004,42 @@ def class_llm_methods(files: list[SourceFile]) -> dict[str, set[str]]:
         mods, names = _imports(tree)
         clients = _client_vars(tree, mods, names)
         chains = LLM_CHAINS + (LLM_CHAINS_IF_IMPORTED if _imports_llm(mods, names) else ())
+        parsed.append((tree, mods, names, clients, chains))
+
+    def callee(call: ast.Call) -> str | None:
+        f = call.func
+        if isinstance(f, ast.Name):
+            return f.id
+        if isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and f.value.id in ("self", "cls")):
+            return f.attr  # inference.query_model(...)
+        return None
+
+    # the project's module-level functions that reach a model (a name defined twice must reach one both times)
+    funcs: dict[str, list[ast.AST]] = {}
+    asking: set[str] = set()
+    for tree, mods, names, clients, chains in parsed:
+        for fn in tree.body:
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.setdefault(fn.name, []).append(fn)
+                if _llm_call(fn, mods, names, clients, chains):
+                    asking.add(fn.name)
+    grew = True
+    while grew:
+        grew = False
+        for name, defs in funcs.items():
+            if name not in asking and all(any(callee(c) in asking for c in _own_calls(d)) for d in defs):
+                asking.add(name)
+                grew = True
+
+    if functions_out is not None:
+        functions_out.update(asking)
+    out: dict[str, set[str]] = {}
+    for tree, mods, names, clients, chains in parsed:
         for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
             methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
-            hits = {n for n, m in methods.items() if _llm_call(m, mods, names, clients, chains, in_class=True)
-                    and n != "__init__"}
+            hits = {n for n, m in methods.items() if n != "__init__" and (
+                _llm_call(m, mods, names, clients, chains, in_class=True)
+                or any(callee(c) in asking and callee(c) not in methods for c in _own_calls(m)))}
             grew = True
             while grew:
                 grew = False
