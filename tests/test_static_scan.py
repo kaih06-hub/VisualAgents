@@ -336,7 +336,10 @@ def test_a_default_roles_list_naming_parts_of_the_project_is_reported(tmp_path):
     assert facts["config_lists"] == [{"file": "app/session/session.py", "line": 3,
                                       "names": ["planner", "code_interpreter"]}]
     # nothing is dropped for it: which roles a default run uses is for the model to read
-    assert {"Planner", "CodeGenerator", "CodeGeneratorCLIOnly", "ImageReader"} <= {a["name"] for a in bp["agents"]}
+    assert {"Planner", "CodeGenerator", "ImageReader"} <= {a["name"] for a in bp["agents"]}
+    # the CLI-only build of the code generator is the same agent in another mode: it joins CodeGenerator
+    gen = next(a for a in bp["agents"] if a["name"] == "CodeGenerator")
+    assert "CodeGeneratorCLIOnly" in gen["aliases"]
 
 
 def test_a_list_of_chat_roles_is_not_a_config_fact(tmp_path):

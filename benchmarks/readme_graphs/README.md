@@ -29,3 +29,8 @@ used only to measure: main against dev-refinement, in `results-set4-2026-10-21.j
 
 A fifth set of ten (`ground_truth_set5.py`, `run_set5.sh`, `score.py <out> set5`) covers PydanticAI, Agno, DSPy and
 smolagents projects. Sets 1-5 before/after the fixes it led to are in `results-sets12345-2026-10-21.json`.
+
+A sixth set of ten (`ground_truth_set6.py`, `run_set6.sh`, `score.py <out> set6`), written from the README diagrams before
+any scan, covers TradingAgents, gpt-researcher's multi-agent team, Voyager, Agent Laboratory, STORM, a LlamaIndex
+concierge, an ADK loan desk, TaskWeaver, Enterprise Deep Research and XAgent. Sets 1-6 on main and dev-refinement are in
+`results-set6-2026-10-22.json`; the write-up is `REPORT-set6-2026-10-22.md`.
