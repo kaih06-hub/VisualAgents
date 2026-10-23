@@ -73,6 +73,11 @@
 
   // ?t=SECONDS opens the run rewound to that moment; ?theme=light|dark; ?popup=0|1 (shareable views)
   const PARAMS = new URLSearchParams(location.search);
+  // the server writes this run's session token into the page for a browser on this computer; Start and reset need it
+  const SESSION = (() => {
+    const t = (document.querySelector('meta[name="va-session"]') || {}).content || "";
+    return t && !t.startsWith("{{") ? { "X-VisualAgents-Session": t } : {};
+  })();
   const q = (path) => (S.projectId ? `${path}${path.includes("?") ? "&" : "?"}project=${encodeURIComponent(S.projectId)}` : path);
 
   const wrap = $("#canvas-wrap"), canvas = $("#canvas"), edgesSvg = $("#edges"), nodesEl = $("#nodes");
@@ -934,7 +939,7 @@
       const task = input ? input.value.trim() : "";
       let out = { ok: false, message: "Couldn't reach VisualAgents." };
       try {
-        out = await (await fetch(q("/api/start"), { method: "POST", headers: { "Content-Type": "application/json" },
+        out = await (await fetch(q("/api/start"), { method: "POST", headers: { "Content-Type": "application/json", ...SESSION },
           body: JSON.stringify({ task }) })).json();
       } catch { /* shown below */ }
       if (out.launch) S.meta.launch = out.launch;
@@ -1704,7 +1709,7 @@
     document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeModal));
     $("#drawer-close").onclick = closeDrawer;
     $("#hide-logs").onchange = (e) => { S.hideLogs = e.target.checked; rebuildFeed(); };
-    $("#reset-view").onclick = () => fetch(q("/api/reset"), { method: "POST" });
+    $("#reset-view").onclick = () => fetch(q("/api/reset"), { method: "POST", headers: SESSION });
     feedEl.addEventListener("scroll", () => {
       const atEnd = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 40;
       if (S.programmaticScroll) {

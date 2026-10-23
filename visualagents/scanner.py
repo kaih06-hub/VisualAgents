@@ -23,7 +23,11 @@ def scan_project(
 ) -> dict[str, Any]:
     """mode: 'static' (offline), 'llm' (require an LLM), or 'auto' (LLM when a key is configured)."""
     project = Path(project).resolve()
-    llm.load_dotenv_keys(project if project.is_dir() else project.parent)
+    folder = project if project.is_dir() else project.parent
+    ignored = llm.load_dotenv_keys(folder)
+    if ignored:
+        log(f"Ignored {', '.join(ignored)} in {folder / '.env'}: where requests go and which provider is used come "
+            "from your environment or `visualagents setup`, never from the project being scanned.")
     files = collect(project)
     log(f"Read {len(files)} candidate file(s) from {project}")
     facts: dict[str, Any] = {}

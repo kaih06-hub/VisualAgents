@@ -1,6 +1,7 @@
 """The dashboard's ▶ Start button (and its task box)."""
 
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -16,8 +17,11 @@ APP = 'import sys, time\nprint("# Agent: Writer", flush=True)\ntime.sleep(0.5)\n
 
 
 def _post(url, body):
+    """Like the dashboard page: take the session token the page was served with, then post with it."""
+    page = urllib.request.urlopen(url.split("/api/")[0] + "/", timeout=5).read().decode()
+    token = re.search(r'name="va-session" content="([^"]+)"', page).group(1)
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", "X-VisualAgents-Session": token})
     return json.loads(urllib.request.urlopen(req, timeout=5).read())
 
 

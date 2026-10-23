@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Security
+- Scanning someone else's repository can no longer send your API key, or files outside the repository, anywhere:
+  - a project's `.env` may still supply keys and model names, but no longer where requests go or which provider is
+    used (`VISUALAGENTS_PROVIDER`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, Vertex AI settings) - with your saved
+    key, a base URL there sent the key to its server. The scan says when it ignored one.
+  - links that point out of the project (`README.md -> ~/.ssh/id_ed25519`) are skipped, and PEM private keys are
+    redacted like API keys.
+- The dashboard answers only requests addressed to 127.0.0.1 / localhost / [::1] when bound to this computer, so a
+  web page that re-points its domain at 127.0.0.1 (DNS rebinding) cannot read live output or press Start. Start and
+  reset also need the run's session token, which the page gets only when opened on this computer. Binding to the
+  network with `--host` now prints a warning.
+
 ### Fixed
 - Seven gaps found by a sixth check of ten projects against their README graphs (no rule names a project):
   - LangGraph routes added in a loop (`for n in ("bull", "bear"): add_conditional_edges(n, route, PATH_MAP)`) with the
