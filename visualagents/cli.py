@@ -166,19 +166,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _split_run_argv(argv: list[str]) -> tuple[list[str], list[str]]:
-    """`run [opts] [folder] [opts] -- cmd...`; without `--`, the command starts at the first token that is
-    neither an option nor the project folder."""
-    if "--" in argv:
-        i = argv.index("--")
-        return argv[:i], argv[i + 1:]
+    """`run [opts] [folder] [opts] [--] cmd...`; without `--`, the command starts at the first token that is
+    neither an option nor the project folder. A `--` after that is the command's own (`npm run dev -- --port 3000`)."""
     if not argv or argv[0] != "run":
+        if "--" in argv:
+            i = argv.index("--")
+            return argv[:i], argv[i + 1:]
         return argv, []
     ours, rest, i, have_project = ["run"], argv[1:], 0, False
     while i < len(rest):
         tok = rest[i]
+        if tok == "--":
+            return ours, rest[i + 1:]
         if tok.startswith("-"):
             ours.append(tok)
-            if tok in _VALUE_OPTS and i + 1 < len(rest):
+            if tok in _VALUE_OPTS and i + 1 < len(rest) and rest[i + 1] != "--":
                 ours.append(rest[i + 1])
                 i += 1
         elif not have_project and Path(tok).is_dir():
@@ -512,7 +514,7 @@ def _ensure_daemon(port: int) -> dict:
     if info:
         return info
     log = home.home() / "daemon.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
+    log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(log, "ab") as fh:
         subprocess.Popen([sys.executable, "-m", "visualagents", "up", "--foreground", "--no-browser", "--port", str(port)],
                          stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, start_new_session=True)
@@ -574,7 +576,10 @@ def cmd_down(args, _command) -> int:
     if not info:
         termui.info("No background dashboard is running.")
         return 0
-    os.kill(int(info["pid"]), signal.SIGTERM)
+    try:
+        os.kill(int(info["pid"]), signal.SIGTERM)
+    except ProcessLookupError:  # it stopped on its own a moment ago
+        pass
     for _ in range(30):
         time.sleep(0.1)
         if not home.read_daemon():

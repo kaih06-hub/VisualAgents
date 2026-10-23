@@ -18,6 +18,7 @@ class Projects:
     def __init__(self, *, token: str | None = None, daemon: bool = False):
         self.token = token or secrets.token_urlsafe(16)
         self.daemon = daemon
+        self.pid = os.getpid()  # what /api/daemon reports, so a stale daemon.json is never trusted
         self.hubs: dict[str, Hub] = {}
         self.paths: dict[str, str] = {}
         self.order: list[str] = []
@@ -64,26 +65,37 @@ class Projects:
             for pid, p in self.paths.items():
                 if p and os.path.realpath(p) == os.path.realpath(str(path)):
                     return self.hubs[pid]
-            return self.open(Path(str(path)))
+        return self.open(Path(str(path)))
 
     def open(self, path: Path) -> Hub:
         """Hub for a project folder, created on first use (blueprint from disk, or a quick static scan)."""
         path = Path(path).resolve()
         with self.lock:
-            for pid, p in self.paths.items():
-                if p == str(path):
-                    return self.hubs[pid]
+            hub = self._opened(path)
+            if hub is not None:
+                return hub
+        # outside the lock: a first scan can take a while, and every request (state, ingest, listing) needs the lock
+        bp = _load_or_scan(path)
+        record = bpmod.state_dir(path) / "runs"
+        try:
+            record.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            record = None
+        with self.lock:
+            hub = self._opened(path)  # another request may have opened it meanwhile
+            if hub is not None:
+                return hub
             registered = next((k for k, v in home.registry().items() if v.get("path") == str(path)), None)
             pid = registered if registered and registered not in self.hubs else \
                 home.project_id(path, {k: {"path": v} for k, v in self.paths.items()})
-            bp = _load_or_scan(path)
-            record = bpmod.state_dir(path) / "runs"
-            try:
-                record.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                record = None
             hub = Hub(bp, record_dir=record, meta={"mode": "hook", "project": str(path), "project_id": pid})
             return self.add(pid, hub, str(path))
+
+    def _opened(self, path: Path) -> Hub | None:
+        for pid, p in self.paths.items():
+            if p == str(path):
+                return self.hubs[pid]
+        return None
 
     def placeholder(self) -> Hub:
         if self._placeholder is None:

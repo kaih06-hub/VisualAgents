@@ -85,6 +85,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"daemon": self.projects.daemon, "projects": self.projects.listing()})
         elif path == "/api/blueprint":
             self._json(self._hub(url).blueprint)
+        elif path == "/api/daemon":  # proof that daemon.json still names this process (see home.read_daemon)
+            if self.headers.get("X-VisualAgents-Token") != self.projects.token:
+                self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
+            else:
+                self._json({"pid": self.projects.pid})
         elif path == "/api/stream":
             self._stream(url)
         elif path == "/favicon.ico":
@@ -204,6 +209,6 @@ def _bind(host: str, port: int, handler) -> ThreadingHTTPServer:
             return ThreadingHTTPServer((host, p), handler)
         except OSError as exc:  # port in use - try the next one
             last = exc
-            if getattr(exc, "errno", None) not in (48, 98, 10048) and not isinstance(exc, socket.error):
-                raise
+            if getattr(exc, "errno", None) not in (48, 98, 10048):  # EADDRINUSE on macOS, Linux, Windows
+                raise  # a bad --host (EADDRNOTAVAIL, an unknown name) fails the same on every port
     raise last or OSError("could not bind a port")

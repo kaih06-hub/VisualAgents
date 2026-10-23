@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Fixed
+- `visualagents down` no longer signals whatever process now has the pid of a `daemon.json` left by a crash or a
+  reboot, and `up` / `status` no longer report that stale file as a running dashboard: the daemon counts only when
+  the dashboard at its url, asked with its token, answers with that pid.
+- One generated source file (`TABLE = 'row0' + 'row1' + ...` of thousands of terms) no longer crashes every scan,
+  and with it every daemon request for that project: a file nested too deep to analyse is skipped.
+- When the LLM scan fails or finds no agents, the static blueprint it falls back to keeps its keywords.
+- `visualagents run ./app npm run dev -- --port 3000`: a `--` after the command starts is the command's own.
+- Smaller: `keys.json` is never briefly readable by other users while it is written; the daemon answers other
+  requests while it scans a newly hooked project; a run's output pipe is no longer closed while still being read;
+  the log follower survives a log it cannot open; the hook runtime never raises into the program (its folder
+  deleted, for example); a bad `--host` fails at once instead of after 20 tries.
 - Seven gaps found by a sixth check of ten projects against their README graphs (no rule names a project):
   - LangGraph routes added in a loop (`for n in ("bull", "bear"): add_conditional_edges(n, route, PATH_MAP)`) with the
     path map kept in a constant, and nodes named from a table of records (`for s in SPECS: add_node(s.agent_node, ...)`,

@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .collector import SourceFile, agent_class_names, is_test_file
+from .collector import SourceFile, agent_class_names, is_test_file, parse_python
 
 LLM_MODULES = (
     "openai", "anthropic", "google.genai", "google.generativeai", "litellm", "ollama", "mlx_lm", "mlx_vlm",
@@ -107,9 +107,8 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         if f.path.suffix.lower() not in (".py", ".ipynb") or _SKIP_PATH.search(f.rel.replace("\\", "/")) \
                 or is_test_file(f.rel, f.text):
             continue
-        try:
-            tree = ast.parse(f.text)
-        except (SyntaxError, ValueError):
+        tree = parse_python(f.text)
+        if tree is None:
             continue
         imports[f.rel] = _import_sources(tree)
         referenced.update(n.id if isinstance(n, ast.Name) else n.attr
@@ -997,9 +996,8 @@ def class_llm_methods(files: list[SourceFile], functions_out: set[str] | None = 
     for f in files:
         if f.path.suffix.lower() not in (".py", ".ipynb") or is_test_file(f.rel, f.text):
             continue
-        try:
-            tree = ast.parse(f.text)
-        except (SyntaxError, ValueError):
+        tree = parse_python(f.text)
+        if tree is None:
             continue
         mods, names = _imports(tree)
         clients = _client_vars(tree, mods, names)

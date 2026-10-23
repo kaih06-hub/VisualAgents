@@ -121,6 +121,13 @@ def _text(value, limit=4000):
 
 def emit(type, agent=None, text=None, **data):
     """Send one event. type: agent_start, agent_end, thought, tool_start, tool_end, handoff, output, log, error."""
+    try:
+        _emit(type, agent, text, data)
+    except Exception:  # reporting must never break the host program
+        pass
+
+
+def _emit(type, agent, text, data):
     if os.environ.get("VISUALAGENTS_DISABLE") == "1":
         return
     payload = {"type": type, "ts": time.time()}
@@ -166,8 +173,12 @@ _pending = __import__("collections").deque(maxlen=300)
 def _arm():
     """First agent-like event in a lazily hooked process: announce it, then replay its recent output."""
     _config["armed"] = True
+    try:
+        cwd = os.getcwd()
+    except OSError:  # the folder it was started in has since been removed
+        cwd = ""
     hello = {"type": "process_start", "ts": time.time(), "pid": os.getpid(),
-             "text": " ".join(sys.argv) or sys.executable, "cwd": os.getcwd()}
+             "text": " ".join(sys.argv) or sys.executable, "cwd": cwd}
     if _config.get("project"):
         hello["project"] = _config["project"]
     if _url():
