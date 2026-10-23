@@ -1,8 +1,15 @@
-"""Local web server: serves the dashboard and streams live state over Server-Sent Events."""
+"""Local web server: serves the dashboard and streams live state over Server-Sent Events.
+
+Bound to this computer (the default), it answers only requests addressed to 127.0.0.1 / localhost / [::1], so a web
+page that re-points its own domain at 127.0.0.1 (DNS rebinding) cannot read the live output or press Start. Start and
+reset also need the per-run session token, which is written into the page only for a browser on this computer.
+"""
 
 from __future__ import annotations
 
+import hmac
 import json
+import secrets
 import socket
 import threading
 from http import HTTPStatus
@@ -16,6 +23,29 @@ from .projects import Projects
 
 _TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
           ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"}
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+LOOPBACK_CLIENTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+SESSION_HEADER = "X-VisualAgents-Session"
+
+
+def is_loopback(host: str) -> bool:
+    return host in LOOPBACK_HOSTS
+
+
+def exposure_warning(host: str) -> str | None:
+    """What to tell the user when the dashboard is bound to the network rather than this computer."""
+    if is_loopback(host):
+        return None
+    return (f"The dashboard listens on {host or 'every interface'}: anyone who can reach this computer on the network can "
+            "watch your agents' live output and prompts. Start and reset still work only from this computer.")
+
+
+def _host_name(header: str) -> str:
+    """'127.0.0.1:7420' -> '127.0.0.1', '[::1]:7420' -> '::1', 'localhost' -> 'localhost'."""
+    header = header.strip().lower()
+    if header.startswith("["):
+        return header[1:header.find("]")] if "]" in header else header
+    return header.rsplit(":", 1)[0] if header.count(":") == 1 else header
 
 
 def _asset(name: str) -> bytes | None:
@@ -29,6 +59,8 @@ def _asset(name: str) -> bytes | None:
 
 class _Handler(BaseHTTPRequestHandler):
     projects: Projects
+    session: str
+    local_only: bool  # bound to this computer: only requests addressed to a loopback name are answered
     server_version = "VisualAgents"
     protocol_version = "HTTP/1.1"
 
@@ -58,16 +90,40 @@ class _Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         return origin is None or urlparse(origin).netloc == self.headers.get("Host")
 
+    def _host_ok(self) -> bool:
+        host = self.headers.get("Host")
+        if not self.local_only or host is None:  # bound to the network on purpose (--host), or a bare HTTP/1.0 client
+            return True
+        if is_loopback(_host_name(host)):
+            return True
+        self._send(HTTPStatus.MISDIRECTED_REQUEST, b"this dashboard only answers 127.0.0.1 / localhost", "text/plain")
+        return False
+
+    def _may_control(self) -> bool:
+        """Start / reset: same origin, and the session token the page was served with."""
+        token = self.headers.get(SESSION_HEADER) or ""
+        if self._same_origin() and hmac.compare_digest(token.encode(), self.session.encode()):
+            return True
+        self._json({"ok": False, "error": "forbidden",
+                    "message": "Start and reset work only from the dashboard on this computer."}, HTTPStatus.FORBIDDEN)
+        return False
+
+    def _index(self) -> bytes:
+        body = _asset("index.html") or b"missing index.html"
+        local = self.client_address[0] in LOOPBACK_CLIENTS
+        return body.replace(b"{{VA_SESSION}}", self.session.encode() if local else b"")
+
     # -- routes ------------------------------------------------------------
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
         url = urlparse(self.path)
         path = url.path
         if path in ("/", "/index.html"):
-            body = _asset("index.html") or b"missing index.html"
-            self._send(200, body, _TYPES[".html"])
+            self._send(200, self._index(), _TYPES[".html"])
         elif path.startswith("/assets/"):
             name = path[len("/assets/"):]
             body = _asset(name)
@@ -101,6 +157,8 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(min(length, 8_000_000)) if length else b""
+        if not self._host_ok():
+            return
         if path == "/api/ingest":
             if self.headers.get("X-VisualAgents-Token") != self.projects.token:
                 self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
@@ -123,8 +181,7 @@ class _Handler(BaseHTTPRequestHandler):
                     hub.feed_structured(item)
             self._json({"ok": True, "count": len(items)})
         elif path == "/api/start":
-            if not self._same_origin():
-                self._json({"error": "cross-origin"}, HTTPStatus.FORBIDDEN)
+            if not self._may_control():
                 return
             hub = self._hub(urlparse(self.path))
             if hub.launcher is None:
@@ -138,8 +195,7 @@ class _Handler(BaseHTTPRequestHandler):
             ok, message = hub.launcher.start(task)
             self._json({"ok": ok, "message": message, "launch": hub.launcher.info()})
         elif path == "/api/reset":
-            if not self._same_origin():
-                self._json({"error": "cross-origin"}, HTTPStatus.FORBIDDEN)
+            if not self._may_control():
                 return
             self._hub(urlparse(self.path)).reset_view()
             self._json({"ok": True})
@@ -182,7 +238,9 @@ class _Handler(BaseHTTPRequestHandler):
 class Server:
     def __init__(self, target: Hub | Projects, host: str = "127.0.0.1", port: int = 7420):
         self.projects = target if isinstance(target, Projects) else Projects.single(target)
-        handler = type("Handler", (_Handler,), {"projects": self.projects})
+        self.session = secrets.token_urlsafe(16)
+        handler = type("Handler", (_Handler,), {"projects": self.projects, "session": self.session,
+                                                "local_only": is_loopback(host)})
         self.httpd = _bind(host, port, handler)
         self.httpd.daemon_threads = True
         self.host, self.port = self.httpd.server_address[:2]

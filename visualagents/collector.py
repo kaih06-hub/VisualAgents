@@ -1,8 +1,8 @@
 """Collects the source files of a project that are most likely to define agents.
 
-Secrets never leave the machine: files git ignores (local config, data, user documents)
-and env/key files are skipped, and anything that looks like an API key is redacted
-before file contents are handed to an LLM.
+Secrets never leave the machine: files git ignores (local config, data, user documents),
+env/key files and links that point out of the project are skipped, and anything that looks like an API key or a
+private key is redacted before file contents are handed to an LLM.
 
 What the LLM sees (pack): an outline of every source file first - its classes, functions and prompt
 personas with line numbers, a few percent of the code's size - then as many files as fit in full, agent
@@ -83,6 +83,8 @@ PERSONA = re.compile(r"\bYou are (?:an? |the )?[^\n.!?\"']{3,100}")
 AGENT_FILE_BONUS = 8  # a file defining agent classes - and so each sibling subclass of the same base - outranks helpers
 
 SECRET_PATTERNS = [
+    # PEM private keys (SSH, TLS, PGP armour aside), also when the END line was cut off
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"),
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{10,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"),
@@ -174,7 +176,8 @@ def iter_files(root: Path):
     if root.is_file():
         yield root
         return
-    visible = _git_visible(root.resolve())
+    base = root.resolve()
+    visible = _git_visible(base)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
             d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".") and not d.endswith(".egg-info")
@@ -185,7 +188,10 @@ def iter_files(root: Path):
                 continue
             if name in {"package-lock.json", "poetry.lock", "uv.lock", "yarn.lock", "pnpm-lock.yaml"}:
                 continue
-            if visible is not None and p.resolve() not in visible:
+            real = p.resolve()
+            if base not in real.parents:
+                continue  # a link out of the project (README.md -> ~/.ssh/id_ed25519): never read what it points at
+            if visible is not None and real not in visible:
                 continue  # gitignored: local config with credentials, data, the user's own documents
             yield p
 

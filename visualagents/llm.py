@@ -29,6 +29,10 @@ _DOTENV_VARS = {
     *(v for vs in KEY_VARS.values() for v in vs), "ANTHROPIC_BASE_URL", "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_LOCATION", "VISUALAGENTS_PROVIDER", "VISUALAGENTS_MODEL", "VISUALAGENTS_NARRATE_MODEL",
 }
+# Where requests go and which provider gets them. Never taken from the .env of the project being scanned: it may be
+# someone else's repository, and a base URL there would send your saved key - and the code - to its server.
+_ROUTING_VARS = {"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "VISUALAGENTS_PROVIDER", "GOOGLE_GENAI_USE_VERTEXAI",
+                 "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"}
 # Models that accept the server-side refusal fallback (beta server-side-fallback-2026-07-01).
 _FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
 _NO_EFFORT = ("claude-3", "claude-haiku-4", "claude-sonnet-4-5", "claude-sonnet-4-0", "claude-opus-4-0", "claude-opus-4-1")
@@ -38,9 +42,15 @@ class LLMError(RuntimeError):
     pass
 
 
-def load_dotenv_keys(project: Path) -> None:
-    """Pick up provider keys and model choices from the project's .env if they aren't already set."""
-    for candidate in (Path(project) / ".env", Path.cwd() / ".env"):
+def load_dotenv_keys(project: Path) -> list[str]:
+    """Pick up provider keys and model choices from the project's .env (and the current folder's) if they aren't
+    already set. Endpoint and provider settings (_ROUTING_VARS) come only from the environment, what the guided start
+    saved, or a .env in a current folder outside the project - never from a .env inside the project. Returns the
+    settings a project .env tried to set and that were left out."""
+    project = Path(project).resolve()
+    ignored: list[str] = []
+    for candidate in dict.fromkeys((project / ".env", Path.cwd().resolve() / ".env")):
+        in_project = candidate.parent == project or project in candidate.parent.parents
         try:
             lines = candidate.read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -54,10 +64,15 @@ def load_dotenv_keys(project: Path) -> None:
             k, v = line.split("=", 1)
             k, v = k.strip(), v.strip().strip("'\"")
             if k in _DOTENV_VARS and v and not os.environ.get(k):
+                if in_project and k in _ROUTING_VARS:
+                    if k not in ignored:
+                        ignored.append(k)
+                    continue
                 os.environ[k] = v
     from . import home
 
     home.apply_saved()  # keys and choices saved by the setup wizard come last
+    return ignored
 
 
 def has_credentials(provider: str) -> bool:

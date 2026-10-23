@@ -280,6 +280,9 @@ A free Gemini key has no quota for the Pro models: pick `gemini-flash-latest` th
 
 Keys and choices are read from, in order: your shell environment, the project's `.env`, then what the guided
 start saved. You can also set `VISUALAGENTS_PROVIDER`, `VISUALAGENTS_MODEL` and `VISUALAGENTS_NARRATE_MODEL`.
+Where requests go and which provider is used (`VISUALAGENTS_PROVIDER`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+the Vertex AI settings) are never taken from the `.env` of the project being scanned - it may be someone else's
+repository - only from your shell, a `.env` in a folder outside the project, or `visualagents setup`.
 Gemini requests retry automatically when the model is busy.
 
 ## Instrument anything yourself

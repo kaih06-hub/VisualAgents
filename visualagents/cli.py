@@ -18,7 +18,7 @@ from . import blueprint as bpmod
 from . import termui
 from .hub import Hub
 from .llm import PROVIDERS, LLMError, detect_provider, load_dotenv_keys
-from .server import Server
+from .server import Server, exposure_warning
 
 DEFAULT_PORT = 7420
 DAEMON_PORT = 7400
@@ -258,6 +258,8 @@ def _record_dir(project: Path, args: argparse.Namespace) -> Path | None:
 def _serve(hub: Hub, args: argparse.Namespace, extra: str = "") -> Server:
     server = Server(hub, host=args.host, port=args.port).start()
     termui.banner(server.url, hub.blueprint, extra)
+    if exposure_warning(args.host):
+        termui.info(termui.warn(exposure_warning(args.host)))
     if not args.no_browser and not os.environ.get("VISUALAGENTS_NO_BROWSER"):
         threading.Timer(0.4, lambda: webbrowser.open(server.url)).start()
     return server
@@ -550,6 +552,8 @@ def cmd_up(args, _command) -> int:
                 except Exception as exc:  # a broken project must not take the daemon down
                     termui.error(f"skipping {meta['path']}: {exc}")
         server = Server(projects, host=args.host, port=args.port).start()
+        if exposure_warning(args.host):
+            termui.info(termui.warn(exposure_warning(args.host)))
         home.write_daemon(server.url, projects.token, os.getpid())
         termui.info(f"Dashboard for hooked projects at {server.url}  (Ctrl+C to stop)")
         install_sigterm_handler()
