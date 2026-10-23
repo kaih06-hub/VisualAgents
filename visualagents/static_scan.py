@@ -18,7 +18,7 @@ from typing import Any
 
 from . import blueprint as bpmod
 from . import call_sites, run_order
-from .collector import SKIP_DIRS, SourceFile, collect, is_test_file
+from .collector import SKIP_DIRS, SourceFile, collect, is_test_file, parse_python
 
 AGENT_CLASSES = {
     "Agent", "AssistantAgent", "UserProxyAgent", "ConversableAgent", "CodeExecutorAgent",
@@ -406,10 +406,7 @@ def _role_lists(tree: ast.AST, rel: str, c: _Collector) -> None:
 
 
 def _parse(src: SourceFile) -> ast.Module | None:
-    try:
-        return ast.parse(src.text)
-    except (SyntaxError, ValueError):
-        return None
+    return parse_python(src.text)
 
 
 def _scan_python(src: SourceFile, c: _Collector) -> None:

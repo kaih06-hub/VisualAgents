@@ -243,12 +243,43 @@ def drop_superseded(files: list[SourceFile]) -> list[SourceFile]:
     return [f for f in files if not superseded(f.rel)]
 
 
+MAX_AST_DEPTH = 300  # real code nests under 100 levels; the analysers recurse once per level
+
+
+def parse_python(text: str) -> ast.Module | None:
+    """The file's syntax tree, or None when it can't be analysed: not valid Python, or so deeply nested (a generated
+    `TABLE = 'row0' + 'row1' + ...` of thousands of terms) that parsing or walking it would exhaust the stack.
+    Such a file is skipped; it never takes the whole scan down."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    key = hash(text)
+    shallow = _SHALLOW.get(key)
+    if shallow is None:
+        if len(_SHALLOW) > 20_000:
+            _SHALLOW.clear()
+        shallow = _SHALLOW[key] = _nests_less_than(tree, MAX_AST_DEPTH)
+    return tree if shallow else None
+
+
+_SHALLOW: dict[int, bool] = {}  # hash of a file's text -> its verdict: several analysers parse each file in a scan
+
+
+def _nests_less_than(tree: ast.AST, limit: int) -> bool:
+    level: list[ast.AST] = [tree]
+    for _ in range(limit):  # one level of the tree at a time: no recursion of its own
+        level = [child for node in level for child in ast.iter_child_nodes(node)]
+        if not level:
+            return True
+    return False
+
+
 def _classes(f: SourceFile) -> list[ast.ClassDef]:
     if f.path.suffix.lower() not in (".py", ".ipynb"):
         return []
-    try:
-        tree = ast.parse(f.text)
-    except (SyntaxError, ValueError):
+    tree = parse_python(f.text)
+    if tree is None:
         return []
     return [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
 
@@ -315,10 +346,7 @@ def _outline_lines(f: SourceFile) -> list[str]:
     lines: list[str] = []
     suffix = f.path.suffix.lower()
     if suffix in (".py", ".ipynb"):
-        try:
-            tree = ast.parse(f.text)
-        except (SyntaxError, ValueError):
-            tree = None
+        tree = parse_python(f.text)
         for node in tree.body if tree else []:
             if isinstance(node, ast.ClassDef):
                 methods = [m.name for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]

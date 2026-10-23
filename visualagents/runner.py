@@ -179,24 +179,23 @@ def _run_pty(command, hub, cwd, env, echo_fn) -> int:
     splitter = LineSplitter(lambda line: hub.feed_line(line, "stdout"), echo_fn)
 
     def pump():
-        while True:
-            try:
-                data = os.read(master, 65536)
-            except OSError:  # EIO once every writer has closed the pty
-                break
-            if not data:
-                break
-            splitter.feed(data)
-        splitter.close()
+        try:
+            while True:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:  # EIO once every writer has closed the pty
+                    break
+                if not data:
+                    break
+                splitter.feed(data)
+            splitter.close()
+        finally:
+            os.close(master)  # see _run_pipes
 
     t = threading.Thread(target=pump, name="visualagents-pty", daemon=True)
     t.start()
     code = _wait_interruptibly(proc)
     t.join(timeout=2.0)
-    try:
-        os.close(master)
-    except OSError:
-        pass
     return code
 
 
@@ -217,24 +216,25 @@ def _run_pipes(command, hub, cwd, env, echo_fn) -> int:
 
     def pump():
         fd = read_fd
-        while True:
-            try:
-                data = os.read(fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            splitter.feed(data)
-        splitter.close()
+        try:
+            while True:
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                splitter.feed(data)
+            splitter.close()
+        finally:
+            # closed only once nothing reads it: a background grandchild may keep the pipe open past join(), and an
+            # fd closed under a blocked read gets reused (a followed log, a socket) and read into the feed
+            os.close(fd)
 
     t = threading.Thread(target=pump, name="visualagents-pipe", daemon=True)
     t.start()
     code = _wait_interruptibly(proc)
     t.join(timeout=2.0)
-    try:
-        os.close(read_fd)
-    except OSError:
-        pass
     return code
 
 
@@ -251,16 +251,20 @@ def follow_file(path: Path, hub: Hub, *, from_start: bool = False, echo: bool = 
     while not stop.is_set():
         try:
             st = path.stat()
-        except FileNotFoundError:
-            time.sleep(0.3)
+        except OSError:
+            stop.wait(0.3)
             continue
         if inode != st.st_ino or st.st_size < pos:  # new or rotated / truncated file
             inode, pos = st.st_ino, 0 if (from_start or not first) else st.st_size
             first = False
         if st.st_size > pos:
-            with open(path, "rb") as fh:
-                fh.seek(pos)
-                data = fh.read(st.st_size - pos)
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(pos)
+                    data = fh.read(st.st_size - pos)
+            except OSError:  # rotated away since the stat, or not readable (yet): try again shortly
+                stop.wait(0.3)
+                continue
             pos += len(data)
             buf += data.decode("utf-8", errors="replace")
             *lines, buf = buf.split("\n")

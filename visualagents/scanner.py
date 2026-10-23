@@ -47,8 +47,8 @@ def scan_project(
     # files static analysis found agents in are sent in full first, whatever their keyword score
     source, included = pack(files, budget_chars=max_chars, prefer={a["file"] for a in static["agents"] if a.get("file")})
     hints = {k: static[k] for k in ("framework", "agents", "edges", "entry", "exits", "steps")}
-    for a in hints["agents"]:
-        a.pop("keywords", None)
+    # copies: the static blueprint is the fallback when the LLM fails, and it needs its keywords for log matching
+    hints["agents"] = [{k: v for k, v in a.items() if k != "keywords"} for a in static["agents"]]
     if facts:
         hints["facts"] = facts
     prompt = (

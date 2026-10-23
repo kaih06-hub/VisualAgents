@@ -25,10 +25,13 @@ def _read(path: Path) -> dict[str, Any]:
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    # private from the moment it exists (keys.json holds API keys), not only after a chmod
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        os.fchmod(fd, 0o600)  # a tmp left behind by an older version keeps its mode under O_CREAT
+        fh.write(json.dumps(data, indent=2) + "\n")
     tmp.replace(path)
 
 
@@ -39,12 +42,35 @@ def daemon_file() -> Path:
 
 
 def read_daemon() -> dict[str, Any]:
-    """The running daemon's {url, token, pid}, or {} when none is running."""
+    """The running daemon's {url, token, pid}, or {} when none is running.
+
+    daemon.json outlives a crash or a reboot, and its pid may since belong to another program: the daemon counts as
+    running only when one of this user's processes has that pid and the dashboard at its url, asked with its token,
+    answers with that same pid."""
     info = _read(daemon_file())
-    pid = info.get("pid")
-    if not pid or not _alive(int(pid)):
+    try:
+        pid = int(info.get("pid") or 0)
+    except (TypeError, ValueError):
+        return {}
+    if pid <= 0 or not _alive(pid, ours=True) or _daemon_pid(info) != pid:
         return {}
     return info
+
+
+def _daemon_pid(info: dict[str, Any]) -> int | None:
+    """The pid the dashboard at info's url reports, given info's token; None when nothing (of ours) answers."""
+    import urllib.request
+
+    url, token = info.get("url"), info.get("token")
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")) or not isinstance(token, str):
+        return None
+    req = urllib.request.Request(url + "/api/daemon", headers={"X-VisualAgents-Token": token})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as res:
+            pid = json.loads(res.read(4096)).get("pid")
+    except Exception:
+        return None
+    return pid if isinstance(pid, int) else None
 
 
 def write_daemon(url: str, token: str, pid: int) -> None:
@@ -60,13 +86,12 @@ def clear_daemon(pid: int | None = None) -> None:
             pass
 
 
-def _alive(pid: int) -> bool:
+def _alive(pid: int, *, ours: bool = False) -> bool:
+    """Whether a process has this pid; with ours=True, one of this user's (another user's process is never ours)."""
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
     except PermissionError:
-        return True
+        return not ours
     except OSError:
         return False
     return True
