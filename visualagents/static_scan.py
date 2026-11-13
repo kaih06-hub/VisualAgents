@@ -100,6 +100,7 @@ class _Collector:
         self.unused_classes: list[dict[str, str]] = []  # agent classes nothing in the project creates or names
         self.class_defs: tuple[list[Any], set[str]] | None = None  # every class of the project, parsed once
         self.own_defs: dict[str, ast.AST] = {}  # the functions the project defines at module level, by name
+        self.enums: dict[str, dict[str, str]] | None = None  # Enum classes with string members, read once
         self.node_args: dict[str, set[str]] = {}  # graph node -> names handed to the factory that builds its action
         self.edge_tables: set[tuple[str, str]] = set()  # add_edge(e["from"], e["to"]): the keys of its edge dicts
         self.group_chats: list[dict[str, Any]] = []  # members and speaker selection of each group chat
@@ -110,6 +111,10 @@ class _Collector:
         self.llm_functions: set[str] = set()  # the project's module-level functions that reach a model
         self.callbacks: list[tuple[str, str, str]] = []  # (agent, function, callback keyword) given to an agent
         self.record_agents: list[str] = []  # agents written as data records: AgentConfig(name=..., system_prompt=...)
+        self.vendored: set[str] | None = None  # top folders holding a copy of a library, worked out once
+        self.joined: set[str] = set()  # model callers that joined a framework's agents (_join_model_callers)
+        self.project_classes: dict[str, list[ast.ClassDef]] = {}  # every class the project defines, by name
+        self.node_actions: dict[str, list[tuple[str, ast.AST]]] = {}  # graph node -> (file, what add_node runs for it)
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -500,15 +505,23 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 c.vote("langgraph")
             first = node.args[0] if node.args else _kw(node, "node")
             second = node.args[1] if len(node.args) > 1 else _kw(node, "action")
-            made = _node_names(first, second, node, parents, tree, c)
-            c.builder_nodes.setdefault(f"{src.rel}:{_ref(node.func.value) or ''}", set()).update(n for n, _ in made)
+            looped = _looped_nodes(first, second, node, parents, tree, c)
+            made = [(n, _ref(act) if isinstance(act, (ast.Name, ast.Attribute)) else None, act) for n, act in looped] or \
+                [(n, f, second) for n, f in _node_names(first, second, node, parents, tree, c)]
+            c.builder_nodes.setdefault(f"{src.rel}:{_ref(node.func.value) or ''}", set()).update(n for n, _, _ in made)
             tmpl = _template_builder(second, tree, src.rel)
             if tmpl:  # add_node(name, _analyst_graph(spec, ...)): a function that builds and compiles a graph per node
-                c.templates.setdefault(tmpl, set()).update(n for n, _ in made)
-            for node_name, fn_name in made:
+                c.templates.setdefault(tmpl, set()).update(n for n, _, _ in made)
+            for node_name, fn_name, second in made:
                 aliases = [fn_name] if fn_name and fn_name != node_name else []
                 ag = c.add_agent(node_name, file=src.rel, line=node.lineno, aliases=aliases)
                 c.graph_nodes[node_name] = ag
+                if second is not None:
+                    c.node_actions.setdefault(node_name, []).append((src.rel, second))
+                    # analyst = create_analyst(llm); add_node("Analyst", analyst): what the variable was built from
+                    built = _assigned_value(second, node, parents, tree) if isinstance(second, (ast.Name, ast.Attribute)) else None
+                    if built is not None:
+                        c.node_actions[node_name].append((src.rel, built))
                 if fn_name:
                     c.node_funcs[fn_name] = node_name
                 # an agent built for the node by a wrapper: add_node("coder", wrap(agents["coder_agent"], "coder_agent"))
@@ -533,6 +546,15 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             c.edge_tables.add((_subscript_key(node.args[0]), _subscript_key(node.args[1])))
             continue
         if name == "add_edge" and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
+            loop = _binding_loop(node.args[0], node, parents)
+            if loop is not None and loop is _binding_loop(node.args[1], node, parents):
+                # for a, b in EDGES: add_edge(a, b) - each turn of the loop is one arrow, not every a to every b
+                pairs = list(zip(_loop_values(node.args[0], node, parents, tree, c),
+                                 _loop_values(node.args[1], node, parents, tree, c)))
+                if pairs:
+                    for a, b in pairs:
+                        c.edge(a, b)
+                    continue
             srcs = _node_refs(node.args[0], node, parents, tree, c)
             dsts = _node_refs(node.args[1], node, parents, tree, c)
             for a in srcs:
@@ -574,6 +596,8 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
         if name in AGENT_CLASSES or name in AGENT_FACTORIES or (name.endswith("Agent") and node.keywords) or record:
             if name in {"create_handoff_tool"}:
                 continue
+            if name not in AGENT_CLASSES and not record and _not_a_model_agent(name, node, c):
+                continue  # the project's own QLearningAgent(lr=0.1) / TravelAgent(name=...): no model behind it
             own = c.own_defs.get(name) if isinstance(node.func, ast.Name) else None
             if name in AGENT_FACTORIES and own is not None and name not in _imported_names(tree) and not any(
                     isinstance(n, ast.Call) and _call_name(n) in AGENT_FACTORIES | AGENT_CLASSES
@@ -583,8 +607,10 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             role = _lit(_kw(node, *ROLE_KWARGS)) or ""
             if not agent_name and name == "Agent" and _kw(node, "role") is not None:
                 agent_name = role  # CrewAI: the role is the identity
-                c.vote("crewai")
-            if not agent_name and node.args and _lit(node.args[0]) and name not in AGENT_FACTORIES:
+                if "crewai" in imported or name not in c.project_classes:  # not the project's own Agent class
+                    c.vote("crewai")
+            if not agent_name and node.args and _lit(node.args[0]) and name not in AGENT_FACTORIES \
+                    and _name_like(_lit(node.args[0])):
                 agent_name = _lit(node.args[0])
             if not agent_name and targets:
                 agent_name = targets[0]
@@ -695,6 +721,48 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 c.entry.append(hub)
 
 
+# keyword arguments that give an agent its model, its prompt or its tools
+_AGENT_KWARGS = re.compile(r"^(llm|lm|model|model_name|model_client|chat_model|llm_config|client|system_prompt|"
+                           r"system_message|instructions?|prompt|persona|backstory|tools|functions|handoffs)$")
+
+
+def _not_a_model_agent(name: str, call: ast.Call, c: _Collector) -> bool:
+    """Is `name` a class the project defines itself that has nothing of an LLM agent: it (and the project classes it
+    inherits from) reaches no model, spells out no prompt, inherits from no framework's agent class, and is built
+    here without a model, a prompt or tools? A reinforcement-learning QLearningAgent or a TravelAgent record is
+    called an agent too. Classes the project does not define are left alone: a framework this scanner does not know
+    names its agent classes the same way."""
+    if name not in c.project_classes:
+        return False
+    if any(k.arg and _AGENT_KWARGS.match(k.arg) for k in call.keywords):
+        return False
+    seen: set[str] = set()
+    queue = [name]
+    while queue:
+        cls = queue.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        nodes = c.project_classes.get(cls)
+        if nodes is None:  # a base from outside the project
+            if cls in AGENT_CLASSES or OWN_AGENT_BASE.search(cls):
+                return False
+            continue
+        if c.llm_methods.get(cls):
+            return False
+        for node in nodes:
+            if call_sites._writes_prompt(node):
+                return False
+            queue += [_dotted(b).split(".")[-1] for b in node.bases]
+    return True
+
+
+def _name_like(text: str | None) -> bool:
+    """Could this string be an agent's name - a few words, not the instruction it was given
+    (Agent("You are a final decision maker who reviews all opinions ...", "Moderator"))?"""
+    return bool(text) and len(text) <= 48 and len(text.split()) <= 6 and not re.match(r"\s*(You|Your|Please|Act)\b", text)
+
+
 def _scope(node: ast.AST, parents: dict[ast.AST, ast.AST], kinds: tuple) -> ast.AST | None:
     cur = parents.get(node)
     while cur is not None and not isinstance(cur, kinds):
@@ -776,18 +844,153 @@ def _built(var: str, fn: ast.AST) -> list[str]:
     return [o for o in dict.fromkeys(out) if o]
 
 
-def _loop_values(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[str]:
-    """`for w in ("a", "b"): g.add_edge(w, "c")` -> ["a", "b"] for the loop variable."""
-    if not isinstance(arg, ast.Name):
+def _loop_values(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST | None = None,
+                 c: Any = None) -> list[str]:
+    """`for w in ("a", "b"): g.add_edge(w, "c")` -> ["a", "b"] for the loop variable: one name per turn of the loop,
+    in order, whatever the loop runs over (see _elements) - or nothing when any turn's name cannot be read."""
+    loop = _binding_loop(arg, node, parents)
+    if loop is None:
         return []
+    vals = [_name_of(_bound(arg, loop.target, el), c) for el in _elements(loop.iter, loop, parents, tree, c)]
+    return [v for v in vals if v] if vals and all(vals) else []
+
+
+def _binding_loop(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.For | ast.AsyncFor | None:
+    """The innermost `for` around `node` whose target binds the variable `arg` is written with (w, or w.value)."""
+    base = arg.value if isinstance(arg, ast.Attribute) and arg.attr in ("value", "name") else arg
+    if not isinstance(base, ast.Name):
+        return None
     cur = parents.get(node)
     while cur is not None:
-        if isinstance(cur, ast.For) and isinstance(cur.target, ast.Name) and cur.target.id == arg.id:
-            if isinstance(cur.iter, (ast.List, ast.Tuple, ast.Set)):
-                return [v for v in (_lit(e) for e in cur.iter.elts) if v]
-            return []
+        if isinstance(cur, (ast.For, ast.AsyncFor)) and any(
+                isinstance(n, ast.Name) and n.id == base.id for n in ast.walk(cur.target)):
+            return cur
         cur = parents.get(cur)
+    return None
+
+
+def _bound(want: ast.AST | None, target: ast.AST, element: ast.AST) -> ast.AST | None:
+    """The part of `element` that `want` stands for once the loop target is bound to it:
+    `for name, fn in pairs` with want=name -> the first item of each pair; want=agent.value -> <element>.value."""
+    if isinstance(want, ast.Name):
+        if isinstance(target, ast.Name):
+            return element if target.id == want.id else None
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(element, (ast.Tuple, ast.List)) and \
+                len(target.elts) == len(element.elts):
+            for t, e in zip(target.elts, element.elts):
+                got = _bound(want, t, e)
+                if got is not None:
+                    return got
+        return None
+    if isinstance(want, ast.Attribute) and want.attr in ("value", "name"):
+        inner = _bound(want.value, target, element)
+        return ast.Attribute(value=inner, attr=want.attr, ctx=ast.Load()) if inner is not None else None
+    return None
+
+
+def _elements(expr: ast.AST | None, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST | None, c: Any,
+              depth: int = 0) -> list[ast.AST]:
+    """What an iterable written in the source yields, in order: a literal list / tuple / set, a dict (its keys;
+    .items() gives (key, value) pairs), a name set to one of those in this function, this module or one other module
+    of the project, an Enum class of the project (its members), or a comprehension that picks items out of one."""
+    if expr is None or depth > 4:
+        return []
+    if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+        return list(expr.elts)
+    if isinstance(expr, ast.Dict):
+        return [k for k in expr.keys if k is not None]
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and not expr.args and \
+            expr.func.attr in ("items", "keys", "values"):
+        table = expr.func.value
+        if not isinstance(table, ast.Dict):
+            table = _held(table, node, parents, tree, c)
+        if not isinstance(table, ast.Dict):
+            return []
+        pairs = [(k, v) for k, v in zip(table.keys, table.values) if k is not None]
+        if expr.func.attr == "items":
+            return [ast.Tuple(elts=[k, v], ctx=ast.Load()) for k, v in pairs]
+        return [k if expr.func.attr == "keys" else v for k, v in pairs]
+    if isinstance(expr, ast.Call) and _call_name(expr) in ("list", "tuple", "sorted", "set") and len(expr.args) == 1:
+        return _elements(expr.args[0], node, parents, tree, c, depth + 1)
+    if isinstance(expr, (ast.Name, ast.Attribute)):
+        members = _enums(c).get(expr.id) if isinstance(expr, ast.Name) and c is not None else None
+        if members:  # for agent in AgentName: ...
+            return [ast.Attribute(value=expr, attr=m, ctx=ast.Load()) for m in members]
+        return _elements(_held(expr, node, parents, tree, c), node, parents, tree, c, depth + 1)
+    if isinstance(expr, (ast.ListComp, ast.GeneratorExp, ast.SetComp)) and len(expr.generators) == 1 and \
+            not expr.generators[0].ifs:  # agents = [agent for agent, _ in WORKFLOW]
+        gen = expr.generators[0]
+        picked = [_bound(expr.elt, gen.target, el) for el in _elements(gen.iter, node, parents, tree, c, depth + 1)]
+        return picked if all(p is not None for p in picked) else []
     return []
+
+
+def _held(expr: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST], tree: ast.AST | None, c: Any) -> ast.AST | None:
+    """What a variable or self.attribute was set to: before `node` in its function / class, else at module level in
+    this file, else at module level in the one project file that sets a name like it (an imported table)."""
+    if tree is None:
+        return None
+    value = _assigned_value(expr, node, parents, tree)
+    if value is None and isinstance(expr, ast.Name):
+        value = _module_value(expr.id, tree)
+        if value is None and c is not None:
+            found = [v for t in c.trees.values() for v in [_module_value(expr.id, t)] if v is not None]
+            value = found[0] if len(found) == 1 else None
+    return value
+
+
+def _enums(c: Any) -> dict[str, dict[str, str]]:
+    """Every Enum class of the project with string members: {"AgentName": {"DATA": "data", ...}}."""
+    if c is None:
+        return {}
+    if c.enums is None:
+        c.enums = {}
+        for t in c.trees.values():
+            for n in ast.walk(t):
+                if isinstance(n, ast.ClassDef) and any((_ref(b) or "").endswith("Enum") for b in n.bases):
+                    vals = {tg.id: st.value.value for st in n.body if isinstance(st, ast.Assign)
+                            and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)
+                            for tg in st.targets if isinstance(tg, ast.Name)}
+                    if vals:
+                        c.enums.setdefault(n.name, vals)
+    return c.enums
+
+
+def _name_of(el: ast.AST | None, c: Any) -> str | None:
+    """The string one item of a loop stands for: a literal, or a member of a project Enum (its value; .name its name)."""
+    lit = _lit(el)
+    if lit or el is None:
+        return lit
+    member, want = el, "value"
+    if isinstance(el, ast.Attribute) and el.attr in ("value", "name") and isinstance(el.value, ast.Attribute):
+        member, want = el.value, el.attr
+    if isinstance(member, ast.Attribute) and isinstance(member.value, ast.Name):
+        vals = _enums(c).get(member.value.id)
+        if vals and member.attr in vals:
+            return member.attr if want == "name" else vals[member.attr]
+    return None
+
+
+def _looped_nodes(first: ast.AST | None, second: ast.AST | None, node: ast.AST, parents: dict[ast.AST, ast.AST],
+                  tree: ast.AST, c: Any) -> list[tuple[str, ast.AST | None]]:
+    """add_node inside a loop: `for name, fn in {"route": self._route, ...}.items(): g.add_node(name, fn)` or
+    `for agent in agents: g.add_node(agent.value, make(agent))` -> (node name, what it runs) for each turn."""
+    if first is None or _lit(first) is not None:
+        return []
+    loop = _binding_loop(first, node, parents)
+    if loop is None:
+        return []
+    out: list[tuple[str, ast.AST | None]] = []
+    for el in _elements(loop.iter, loop, parents, tree, c):
+        bound = _bound(first, loop.target, el)
+        name = _name_of(bound, c)
+        if not name and second is None and isinstance(bound, (ast.Name, ast.Attribute)):
+            name = _ref(bound)  # for fn in (plan, write, review): g.add_node(fn)
+        if not name:
+            return []
+        act = _bound(second, loop.target, el) if second is not None else bound
+        out.append((name, act if act is not None else second))
+    return out
 
 
 def _module_value(name: str, tree: ast.AST) -> ast.AST | None:
@@ -844,7 +1047,7 @@ def _node_refs(arg: ast.AST, node: ast.AST, parents: dict[ast.AST, ast.AST], tre
     if isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name) and _loop_of(arg.value.id, node, parents):
         return _record_values(arg.attr, c)
     if isinstance(arg, ast.Name) and _lit(arg) is None:
-        looped = _loop_values(arg, node, parents)
+        looped = _loop_values(arg, node, parents, tree, c)
         if looped:
             return looped
         loop = _loop_of(arg.id, node, parents)
@@ -874,14 +1077,26 @@ def _node_names(first: ast.AST | None, second: ast.AST | None, node: ast.AST, pa
     if lit:
         return [(lit, action)]
     if second is None:  # add_node(write_draft) is named after the function - add_node(new_node) holds an object
+        built = first if isinstance(first, ast.Call) else \
+            _assigned_value(first, node, parents, tree) if isinstance(first, ast.Name) else None
+        if isinstance(built, ast.Call) and _plain_object(_call_name(built), c):
+            return []  # graph.add_node(NavNode(...)): a record kept in the project's own graph, nothing that can run
         if isinstance(first, ast.Name):
             fn_like = first.id in c.own_defs or first.id in _imported_names(tree) or \
                 _defined_function(first.id, node, parents)
-            return [(first.id, first.id)] if fn_like else []
+            if fn_like:
+                return [(first.id, first.id)]
+            # guardrails = create_guardrails_node(llm): the node is named after the function the factory returns,
+            # which the variable is nearly always named after too
+            made = _assigned_value(first, node, parents, tree)
+            if isinstance(made, ast.Call):
+                name = _returned_function(_call_name(made), c) or (None if _PLACEHOLDER_VAR.match(first.id) else first.id)
+                return [(name, first.id)] if name else []
+            return []
         r = _ref(first)
         return [(r, r)] if r else []
     if isinstance(first, ast.Name):
-        looped = _loop_values(first, node, parents)
+        looped = _loop_values(first, node, parents, tree, c)
         if looped:
             return [(v, action) for v in looped]
         const = _const_value(first.id, tree)
@@ -899,6 +1114,40 @@ def _node_names(first: ast.AST | None, second: ast.AST | None, node: ast.AST, pa
     tail = first.value if isinstance(first, ast.Attribute) and first.attr == "value" else first
     r = _ref(tail)
     return [(r, action)] if r and r.isupper() else []
+
+
+def _plain_object(cls: str, c: Any, depth: int = 0) -> bool:
+    """Is `cls` a project class whose instances cannot run as a graph node: it inherits only from other such project
+    classes and none of them can be called (no __call__ / invoke)? A class with a base from a library is left alone."""
+    nodes = c.project_classes.get(cls) if c is not None else None
+    if not nodes or depth > 4:
+        return False
+    for n in nodes:
+        if any(isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name in ("__call__", "invoke", "ainvoke")
+               for m in n.body):
+            return False
+        for b in n.bases:
+            base = _ref(b) or ""
+            if base != "object" and not _plain_object(base, c, depth + 1):
+                return False
+    return True
+
+
+# a variable name that says nothing about what it holds
+_PLACEHOLDER_VAR = re.compile(r"^(new_|the_|a_|my_)?(node|fn|func|function|f|n|action|step|handler|callable|runnable|"
+                              r"obj|item|x|agent|graph|subgraph|chain|tool)s?\d*$", re.I)
+
+
+def _returned_function(factory: str, c: Any) -> str | None:
+    """The one function a project factory defines and returns: def create_planner_node(llm): async def planner(state)
+    ...; return planner -> "planner"."""
+    fn = c.own_defs.get(factory)
+    if fn is None:
+        return None
+    inner = {n.name for n in ast.walk(fn) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not fn}
+    returned = {r.value.id for r in ast.walk(fn) if isinstance(r, ast.Return) and isinstance(r.value, ast.Name)
+                and r.value.id in inner}
+    return next(iter(returned)) if len(returned) == 1 else None
 
 
 def _agent_name_kw(call: ast.Call, tree: ast.AST, c: Any) -> str | None:
@@ -1936,6 +2185,11 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
                 c.trees[f.rel] = tree
                 c.own_defs.update({n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
                 c.project_frameworks.update(_frameworks_imported(_imported_modules(tree), f, c.root))
+                if f.rel not in c.test_files:
+                    for n in ast.walk(tree):
+                        if isinstance(n, ast.ClassDef):
+                            c.project_classes.setdefault(n.name, []).append(n)
+    c.llm_methods = call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files], c.llm_functions)
     for f in files:
         ext = f.path.suffix.lower()
         if f.rel in c.test_files and any(g.rel not in c.test_files for g in files):
@@ -2009,9 +2263,9 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
             c.entry.append(seq[0])
             c.exits.append(seq[-1])
 
-    c.llm_methods = call_sites.class_llm_methods([f for f in files if f.rel not in c.test_files], c.llm_functions)
     _model_callbacks(c)
     _scan_classes(files, c)
+    _fold_engines_into_their_class(c)
     _split_pipeline_classes(c, files)
     _fold_into_nodes(c, files)
     run_order.subgraphs_run_in_nodes(c)
@@ -2022,10 +2276,14 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     _record_hub(c)
     run_order.link(c)
     _tool_delegation(c)
+    _fold_agents_into_their_node(c)
 
-    # no framework: every place that calls an LLM is an agent, even when there is only one
-    if not c.agents:
-        found = call_sites.find(files)
+    # Code that prompts a model directly is an agent whether or not a framework builds other agents beside it: both
+    # passes always run, and what the second finds joins the map unless it is one of the first's agents already.
+    found = call_sites.find(files)
+    if c.agents:
+        _join_model_callers(c, found)
+    else:  # no framework: every place that calls an LLM is an agent, even when there is only one
         for a in found["agents"]:
             c.add_agent(a["name"], file=a["file"], line=a["line"], role=a["role"], description=a["description"],
                         tools=a["tools"], aliases=a["aliases"] + sorted(c.instances.get(a["name"], ())))
@@ -2069,6 +2327,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
         e["from"] = c.node_funcs.get(e["from"], e["from"])
 
     _drop_example_agents(c)
+    _drop_side_agents(c)
     _drop_separate_programs(c)
     _merge_mode_variants(c)
     _lone_hub(c)
@@ -2094,6 +2353,269 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     for a in raw["agents"]:
         a["keywords"] = _keywords_for(a)
     return bpmod.stamp(bpmod.normalize(raw), "static")
+
+
+# evaluation and benchmark harnesses measure the system; they are not part of it
+HARNESS_DIRS = re.compile(r"(^|/)(\w*[_\-])?(evals?|evaluations?|evaluators?|benchmarks?|bench|leaderboards?|metrics)"
+                          r"([_\-]\w*)?(/|$)", re.I)
+# a class that is a tool of the agents, by what it is called or inherits: SearchTool, BaseTool, a Plugin
+TOOL_CLASS = re.compile(r"(Tool|Toolkit|Plugin)s?$")
+# a class the agents reach their model through, by what it is called or inherits: OpenAIClient, AnthropicProvider
+MODEL_CLASS = re.compile(r"(Client|Provider|Backend|Transport|Gateway|Connector|LLM|ChatModel|LanguageModel)s?$")
+# one-off programs kept beside the package: a probe, a migration, a smoke check
+SCRIPT_DIRS = re.compile(r"^(scripts?|bin|tools?|utils?|dev|ci|ops|deploy\w*|migrations?)/", re.I)
+# libraries a repository sometimes carries a copy of: a folder named like one, next to the project's own package
+KNOWN_LIBRARIES = {"langchain", "langgraph", "crewai", "autogen", "camel", "metagpt", "llama_index", "smolagents",
+                   "dspy", "fastchat", "transformers", "litellm", "agentscope", "agno", "phi", "haystack",
+                   "semantic_kernel", "guidance", "lagent", "openai", "anthropic", "chainlit", "gradio", "streamlit"}
+
+
+def _library_copies(c: _Collector) -> set[str]:
+    """Top folders that hold a copy of a known library (camel/ inside a project built on CAMEL, FastChat/ beside an
+    evaluation suite): named like the library, not what the repository itself is, and not the only code there is."""
+    if c.vendored is None:
+        tops: dict[str, int] = {}
+        for rel in c.trees:
+            parts = _posix(rel).parts
+            if len(parts) > 1:
+                tops[parts[0]] = tops.get(parts[0], 0) + 1
+        project = bpmod.norm_key(c.root.name)
+        c.vendored = {d for d in tops if d.lower().replace("-", "_") in KNOWN_LIBRARIES
+                      and bpmod.norm_key(d) != project and project not in bpmod.norm_key(d) and len(tops) > 1}
+    return c.vendored
+
+
+def _side_code(rel: str, c: _Collector) -> bool:
+    """Is this file beside the system rather than part of it: a harness that evaluates it, or a library copy?"""
+    rel = rel.replace(os.sep, "/")
+    return bool(HARNESS_DIRS.search(rel)) or rel.split("/", 1)[0] in _library_copies(c)
+
+
+def _drop_side_agents(c: _Collector) -> None:
+    """Agents defined only in an evaluation / benchmark harness or in a library copy stay off the map when the
+    project has agents of its own outside them."""
+    def beside(key: str, agent: dict[str, Any]) -> bool:
+        files = [f for f, _ in c.sites.get(key, [])] or [agent["file"]]
+        return all(f and _side_code(f, c) for f in files)
+
+    side = {k for k, a in c.agents.items() if beside(k, a)}
+    if side and len(side) < len(c.agents):
+        for k in side:
+            del c.agents[k]
+
+
+# method names too common to say which object's method a call runs
+_ANYONES_METHOD = {"run", "arun", "call", "acall", "forward", "invoke", "ainvoke", "chat", "achat", "generate", "step",
+                   "execute", "process", "main", "query", "predict", "complete", "ask", "reply", "respond", "act"}
+
+
+def _agent_code(c: _Collector) -> tuple[dict[str, list[tuple[str, ast.AST]]], dict[str, list[tuple[str, ast.AST]]]]:
+    """(agent key -> the code that is that agent, name -> its definitions). An agent's code is the function or class
+    its definition sits in (`def build(): return Agent(name="writer")`), a graph node's function, and the body of
+    the class an agent is."""
+    defs: dict[str, list[tuple[str, ast.AST]]] = {}
+    by_rel: dict[str, list[ast.AST]] = {}
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        by_rel[rel] = nodes
+        for n in nodes:
+            defs.setdefault(n.name, []).append((rel, n))
+    graph = {id(a): name for name, a in c.graph_nodes.items()}
+    out: dict[str, list[tuple[str, ast.AST]]] = {}
+    for key, agent in c.agents.items():
+        code: list[tuple[str, ast.AST]] = []
+        if id(agent) in graph:  # a graph node is what add_node runs for it, not the builder that wires every node
+            code += c.node_actions.get(graph[id(agent)], [])
+        for rel, line in c.sites.get(key, ()) if id(agent) not in graph else ():
+            around = [n for n in by_rel.get(rel, ()) if n.lineno <= line <= (n.end_lineno or n.lineno)]
+            if around:
+                code.append((rel, max(around, key=lambda n: n.lineno)))  # the innermost one
+        for alias in dict.fromkeys((agent["name"], *agent["aliases"])):
+            for rel, n in defs.get(alias, ()):
+                if isinstance(n, ast.ClassDef) or alias in c.node_funcs or id(agent) in graph:
+                    code.append((rel, n))
+        for rel, n in list(code):  # a method works with what its class sets up: self.chains = Chains() in __init__
+            if isinstance(n, ast.ClassDef):
+                continue
+            cls = next((k for k in by_rel.get(rel, ()) if isinstance(k, ast.ClassDef) and n in k.body), None)
+            code += [(rel, m) for m in (cls.body if cls is not None else ())
+                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name == "__init__"]
+        out[key] = code
+    return out, defs
+
+
+def _names_used(c: _Collector, nodes: list[ast.AST]) -> set[str]:
+    """What this code calls and the classes it names (self.set_actions([WriteReport]), agent = SearchAgent(ctx)),
+    through the project's own module-level functions, five calls deep."""
+    seen: set[int] = set()
+    names: set[str] = set()
+    frontier = list(nodes)
+    for _ in range(6):
+        following: list[ast.AST] = []
+        for node in frontier:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            for n in ast.walk(node):
+                name = _call_name(n) if isinstance(n, ast.Call) else \
+                    n.id if isinstance(n, ast.Name) and n.id[:1].isupper() else ""
+                # a project function handed to something that will run it: wrap(plan_node, "plan"), partial(step, llm)
+                handed = [a.id for a in (*n.args, *(k.value for k in n.keywords)) if isinstance(a, ast.Name)
+                          and a.id in c.own_defs] if isinstance(n, ast.Call) else []
+                for name in (name, *handed):
+                    if name and name not in names:
+                        names.add(name)
+                        if name in c.own_defs:
+                            following.append(c.own_defs[name])
+        frontier = following
+    return names
+
+
+def _fold_engines_into_their_class(c: _Collector) -> None:
+    """An agent class often runs on a framework agent it builds for itself: `self.agent = CodeAgent(tools=...)` in
+    EntityRecognitionAgent.__init__, or in the BaseAgent they all inherit. That object is the class's engine, named
+    only by the attribute holding it (agent, executor, runner). It is its class: an agent class takes its tools, a
+    class named as an agent (IndexerAgent) becomes the agent, and one built in a shared base leaves the map, where
+    the subclasses already stand."""
+    if c.class_defs is None:
+        return
+    from .collector import AGENT_CLASS_NAME
+
+    subclassed = {b.split(".")[-1] for d in c.class_defs[0] for b in d.bases}
+    for key, agent in list(c.agents.items()):
+        if not _PLACEHOLDER_VAR.match(agent["name"].replace(" ", "_")) or agent["name"] in c.agent_classes:
+            continue
+        homes: dict[str, tuple[str, int]] = {}
+        for rel, line in c.sites.get(key, ()):
+            tree = c.trees.get(rel)
+            around = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)
+                      and n.lineno <= line <= (n.end_lineno or n.lineno)] if tree else []
+            inner = max(around, key=lambda n: n.lineno) if around else None
+            homes[inner.name if inner is not None else ""] = (rel, inner.lineno if inner is not None else line)
+        if not homes or not all(h and (h in c.agent_classes or h in subclassed or AGENT_CLASS_NAME.search(h))
+                                for h in homes):
+            continue  # built outside a class, or in one that is no agent: the object is the agent
+        names = {key, bpmod.norm_key(agent["name"]), *(bpmod.norm_key(a) for a in agent["aliases"])}
+        c.edges = [e for e in c.edges if bpmod.norm_key(e["from"]) not in names and bpmod.norm_key(e["to"]) not in names]
+        for alias in list(c.var_to_agent):
+            if c.var_to_agent[alias] == key:
+                del c.var_to_agent[alias]
+        del c.agents[key]
+        for home, (rel, line) in homes.items():
+            if home in subclassed and home not in c.agent_classes:
+                continue  # a shared base: its subclasses are the agents
+            owner = c.agents.get(bpmod.norm_key(home)) or c.add_agent(home, file=rel, line=line)
+            owner["tools"] += [t for t in agent["tools"] if t not in owner["tools"]]
+            owner["description"] = owner["description"] or agent["description"]
+            c.agent_classes.add(home)
+
+
+def _fold_agents_into_their_node(c: _Collector) -> None:
+    """A graph node whose code runs an agent class - run_search(state) builds SearchAgent(...) and awaits it, itself
+    or in a helper it calls - is that agent: one block, not a node and a class side by side. Only when a single node
+    runs it; a class several nodes use is drawn on its own."""
+    if not c.graph_nodes or not c.agent_classes:
+        return
+    code, _ = _agent_code(c)
+    graph = {id(a): name for name, a in c.graph_nodes.items()}
+    used = {key: _names_used(c, [n for _, n in nodes]) for key, nodes in code.items()
+            if nodes and id(c.agents[key]) in graph}
+    for key, agent in list(c.agents.items()):
+        if id(agent) in graph:
+            continue
+        classes = {a for a in (agent["name"], *agent["aliases"]) if a in c.agent_classes}
+        if not classes:
+            continue
+        nodes = [k for k, names in used.items() if classes & names]
+        if len(nodes) != 1 or nodes[0] not in c.agents:
+            continue
+        node_agent = c.agents[nodes[0]]
+        node_agent["role"] = node_agent["role"] or agent["role"]
+        node_agent["description"] = node_agent["description"] or agent["description"]
+        node_agent["tools"] += [t for t in agent["tools"] if t not in node_agent["tools"]]
+        node_agent["aliases"] += [a for a in (agent["name"], *agent["aliases"]) if a not in node_agent["aliases"]]
+        folded = {key, bpmod.norm_key(agent["name"]), *(bpmod.norm_key(a) for a in agent["aliases"])}
+        for e in c.edges:
+            for end in ("from", "to"):
+                if bpmod.norm_key(e[end]) in folded:
+                    e[end] = node_agent["name"]
+        del c.agents[key]
+
+
+def _join_model_callers(c: _Collector, found: dict[str, Any]) -> None:
+    """Agents a framework builds and code that prompts a model directly live side by side: a research assistant made
+    with an SDK next to writer and editor functions that call the model themselves. Every model caller the call-site
+    pass found joins the map, unless it
+
+    - already is one of the agents (same name, or its code lies inside an agent's own definition), a tool of one, or
+      the base class agents share;
+    - is run by an agent's own code: a model call an agent makes through a helper, a chain or a tool is part of that
+      agent, not another one (it is listed as its tool when one agent alone runs it);
+    - does not spell a prompt out (a persona, a system message, a prompt named as one): beside real agents, a
+      function that only reaches the model is plumbing;
+    - is the wrapper around a model vendor (OpenAIClient, a Provider), which agents call through;
+    - sits in an evaluation or benchmark harness, in a copy of a library kept in the repository, or in a scripts
+      folder beside the package that holds the agents."""
+    cands = [a for a in found["agents"] if a.get("_kind") != "file"  # top-level script code next to agents: a driver
+             and a.get("_prompt") and not _side_code(a["file"], c)]
+    if not cands:
+        return
+    known = {bpmod.norm_key(x) for a in c.agents.values() for x in (a["name"], *a["aliases"], *a["tools"])}
+    known |= {bpmod.norm_key(x) for x in (*c.agent_classes, *c.node_funcs, *c.tool_funcs)}
+    defs = c.class_defs[0] if c.class_defs else []  # every class of the project (_scan_classes ran first)
+    bases_of = {d.name: {b.split(".")[-1] for b in d.bases} for d in defs}
+    pending_bases = [b for name in c.agent_classes for b in bases_of.get(name, ())]
+    while pending_bases:  # the classes agents inherit from, all the way up
+        b = pending_bases.pop()
+        if bpmod.norm_key(b) not in known:
+            known.add(bpmod.norm_key(b))
+            pending_bases += bases_of.get(b, ())
+    # ReviewerAgent beside a node called "reviewer": one agent under two names
+    known |= {re.sub(r"(agent|node)$", "", k) for k in known} - {""}
+    code, _ = _agent_code(c)
+
+    def is_known(name: str) -> bool:
+        k = bpmod.norm_key(name)
+        return k in known or re.sub(r"(agent|node)$", "", k) in known
+
+    reach = {key: _names_used(c, [n for _, n in nodes]) for key, nodes in code.items() if nodes}
+    spans = [(rel, n.lineno, getattr(n, "end_lineno", None) or n.lineno) for nodes in code.values() for rel, n in nodes
+             if hasattr(n, "lineno")]
+    added: set[str] = set()
+    for a in cands:
+        if any(is_known(n) for n in (a["name"], *a["aliases"], a.get("_cls") or a["name"])):
+            continue
+        if any(rel == a["file"] and lo <= a["line"] <= hi for rel, lo, hi in spans):
+            continue
+        if TOOL_CLASS.search(a.get("_cls") or "") or any(TOOL_CLASS.search(b) for b in a.get("_bases", ())):
+            continue  # a tool the agents use
+        if MODEL_CLASS.search(a.get("_cls") or "") or any(MODEL_CLASS.search(b) for b in a.get("_bases", ())):
+            continue  # the wrapper around a model vendor that the agents call through
+        if SCRIPT_DIRS.match(a["file"].replace(os.sep, "/")) and not any(
+                SCRIPT_DIRS.match((ag["file"] or "").replace(os.sep, "/")) for ag in c.agents.values()):
+            continue  # a script beside a package that holds the agents
+        if not a.get("_used"):
+            continue  # nothing outside its own file names it: not part of a run
+        # a class is run by the code that names it; a function or method by the code that calls it by name
+        ways = {a["_cls"]} if a.get("_cls") and a.get("_kind") in ("class", "persona", "step") else \
+            {f for f in a.get("_fns", ()) if f not in _ANYONES_METHOD and not f.startswith("__")}
+        runners = [key for key, names in reach.items() if ways & names]
+        if runners:
+            if len(runners) == 1 and a["name"] not in c.agents[runners[0]]["tools"]:
+                c.agents[runners[0]]["tools"].append(a["name"])
+            continue
+        c.add_agent(a["name"], file=a["file"], line=a["line"], role=a["role"], description=a["description"],
+                    tools=a["tools"], aliases=a["aliases"] + sorted(c.instances.get(a["name"], ())))
+        added.add(a["name"])
+        c.joined.add(bpmod.norm_key(a["name"]))
+    if not added:
+        return
+    c.vote("custom", 1)
+    c.edges += [{k: v for k, v in e.items() if k != "_pipeline"} for e in found["edges"]
+                if e["from"] in added or e["to"] in added]
+    run_order.link(c)
 
 
 _RUNS = {"run", "run_sync", "run_stream", "iter", "arun", "ainvoke", "invoke", "kickoff", "kickoff_async"}
@@ -2380,7 +2902,7 @@ def _drop_separate_programs(c: _Collector) -> None:
     inside = {k for k, hs in homes.items() if hs and hs <= separate}
     own: set[str] = set()
     for k, a in c.agents.items():
-        if k not in inside:
+        if k not in inside and k not in c.joined:
             own |= {bpmod.norm_key(n) for n in (k, a["name"], *a["aliases"])}
     if inside and any(bpmod.norm_key(e["from"]) in own and bpmod.norm_key(e["to"]) in own for e in c.edges):
         for k in inside:
@@ -2402,7 +2924,7 @@ def _drop_example_agents(c: _Collector) -> None:
     example = {k for k, a in c.agents.items() if only_examples(k, a)}
     own: set[str] = set()
     for k, a in c.agents.items():
-        if k not in example:
+        if k not in example and k not in c.joined:
             own |= {bpmod.norm_key(n) for n in (k, a["name"], *a["aliases"])}
     wired = any(bpmod.norm_key(e["from"]) in own and bpmod.norm_key(e["to"]) in own for e in c.edges)
     if example and wired:

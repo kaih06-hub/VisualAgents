@@ -34,3 +34,26 @@ A sixth set of ten (`ground_truth_set6.py`, `run_set6.sh`, `score.py <out> set6`
 any scan, covers TradingAgents, gpt-researcher's multi-agent team, Voyager, Agent Laboratory, STORM, a LlamaIndex
 concierge, an ADK loan desk, TaskWeaver, Enterprise Deep Research and XAgent. Sets 1-6 on main and dev-refinement are in
 `results-set6-2026-10-22.json`; the write-up is `REPORT-set6-2026-10-22.md`.
+
+## Held-out sets 10 and 11 (2026-11-13): how the scanner does on projects it was not tuned on
+
+Sets 1-9 were each scored, then the scanner was changed until they scored well, so their numbers say little about a
+project nobody looked at. Sets 10 and 11 were written to measure that. Each ground truth was written from the README
+diagram and the names in the source before any version of the scanner ran on the projects.
+
+| First run on unseen projects (static mode) | agents found | blocks that are README agents | blocks that are real agents | arrows found | arrows right |
+|---|---|---|---|---|---|
+| set 10, `main` | 0.64 | 0.44 | 0.78 | 0.24 | 0.32 |
+| set 10, `dev-refinement` (three more tuning rounds) | 0.67 | 0.44 | 0.77 | 0.25 | 0.31 |
+| set 11, `main` | 0.68 | 0.53 | 0.79 | 0.45 | 0.48 |
+| set 11, `dev-refinement` | 0.68 | 0.54 | 0.79 | 0.45 | 0.48 |
+| set 11, `scan-generalization` before it saw set 11 | 0.70 | 0.49 | 0.71 | 0.50 | 0.54 |
+
+So on unseen projects the scanner finds about two thirds of the README's agents, not the nine in ten sets 1-6 show,
+and rules tuned on one set of ten barely carry to the next. After its first run each set was used to find general
+gaps (nodes added in a loop, files saved with a byte-order mark, model calls reached through a wrapper), and the
+branch now scores 0.82 on set 10 and 0.95 on set 11 for agents found - but those are no longer unseen. The next
+honest number needs a twelfth set, scored once before anything is changed.
+
+`ground_truth_set10.py` / `ground_truth_set11.py` hold the projects and pinned commits; `score.py <out> set10|set11`
+scores a folder of blueprints against them.

@@ -143,7 +143,7 @@ def _read(path: Path) -> str | None:
     try:
         if path.stat().st_size > (MAX_NOTEBOOK_BYTES if notebook else MAX_FILE_BYTES):
             return None
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")  # -sig: drop a byte-order mark
     except OSError:
         return None
     if notebook:
@@ -250,6 +250,8 @@ def parse_python(text: str) -> ast.Module | None:
     """The file's syntax tree, or None when it can't be analysed: not valid Python, or so deeply nested (a generated
     `TABLE = 'row0' + 'row1' + ...` of thousands of terms) that parsing or walking it would exhaust the stack.
     Such a file is skipped; it never takes the whole scan down."""
+    if text.startswith("\ufeff"):  # a byte-order mark (files saved on Windows): ast.parse rejects it in a str
+        text = text.lstrip("\ufeff")
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError, RecursionError, MemoryError):

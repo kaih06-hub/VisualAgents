@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Scanner: fewer rules that only fit the projects they were written on
+Measured on projects the scanner had never seen (two new held-out sets, `benchmarks/readme_graphs`), it found about
+two thirds of the agents a README draws, against nine in ten on the sets it was tuned on. These changes are general
+rules; none names a project.
+- The framework pass and the plain model-call pass both always run. Before, finding one framework agent switched
+  the second pass off, so a project that mixes an SDK agent with functions that prompt a model showed only the first.
+- A model call is recognised by what it does (a receiver or helper named for a model, called with a prompt), not
+  only by a list of known client libraries.
+- Graph nodes and arrows added in a loop are read: `for name, fn in {...}.items(): add_node(name, fn)`, a loop over
+  an Enum or over a table of pairs kept in another module, `for a, b in EDGES: add_edge(a, b)`.
+- What an agent's own code runs is part of that agent: helpers of a node function (also one handed to a wrapper),
+  tool classes, the engine a class keeps as `self.agent`, an agent class run by exactly one graph node.
+- Not agents: a project class merely named `...Agent` with no model, prompt or framework behind it; a record put in
+  the project's own graph class (`nav.add_node(NavNode(...))`); a wrapper around a model vendor (`OpenAIClient`);
+  code in an evaluation harness, a vendored library or a scripts folder beside the package.
+- A runner that prompts the model itself and runs other agents is drawn as their supervisor.
+
+### Fixed
+- A Python file saved with a UTF-8 byte-order mark (common from Windows editors) failed to parse and was skipped
+  without a word - one project lost its whole graph to it. `.env`, `pyproject.toml` and `package.json` saved that
+  way are read correctly too (the first key of such a `.env` used to be ignored).
+- The LLM scan asks for the refusal fallback on `claude-fable-5-2` as it does on the other current models.
+
 ### Security
 - Scanning someone else's repository can no longer send your API key, or files outside the repository, anywhere:
   - a project's `.env` may still supply keys and model names, but no longer where requests go or which provider is

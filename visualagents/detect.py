@@ -270,7 +270,7 @@ def _project_scripts(project: Path) -> list[str]:
     """Console-script names the project defines in pyproject.toml (PEP 621 or Poetry)."""
     p = project / "pyproject.toml"
     try:
-        text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8-sig")
     except OSError:
         return []
     try:
@@ -345,7 +345,7 @@ def _from_python_entries(project: Path) -> list[Candidate]:
             if not f.is_file():
                 continue
             try:
-                src = f.read_text(encoding="utf-8", errors="replace")
+                src = f.read_text(encoding="utf-8-sig", errors="replace")
             except OSError:
                 continue
             rel_dir = os.path.relpath(f.parent, project)
@@ -395,7 +395,7 @@ def _from_package_json(project: Path) -> list[Candidate]:
         if not p.is_file():
             continue
         try:
-            scripts = json.loads(p.read_text(encoding="utf-8")).get("scripts") or {}
+            scripts = json.loads(p.read_text(encoding="utf-8-sig")).get("scripts") or {}
         except (OSError, ValueError):
             continue
         for name in ("dev", "start"):

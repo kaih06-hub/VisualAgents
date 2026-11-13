@@ -36,8 +36,9 @@ LLM_CHAINS_IF_IMPORTED = ("messages.create", "messages.stream", "responses.strea
 LLM_ENTRY = {"completion", "acompletion", "chat", "achat", "generate", "agenerate", "stream_generate",
              "create_chat_completion", "create_completion", "text_generation", "chat_completion"}
 # methods called on a model/client object: llm.invoke(...), model.generate(...), llm(...)
-LLM_USE = {"invoke", "ainvoke", "stream", "astream", "batch", "abatch", "generate", "agenerate", "chat", "complete",
-           "predict", "create_chat_completion", "create_completion", "generate_content"}
+LLM_USE = {"invoke", "ainvoke", "stream", "astream", "batch", "abatch", "generate", "agenerate", "chat", "achat",
+           "complete", "acomplete", "predict", "apredict", "predict_messages", "apredict_messages", "generate_prompt",
+           "agenerate_prompt", "create_chat_completion", "create_completion", "generate_content"}
 CLIENT_CLASSES = {
     "OpenAI", "AsyncOpenAI", "AzureOpenAI", "AsyncAzureOpenAI", "Anthropic", "AsyncAnthropic", "AnthropicBedrock",
     "AnthropicVertex", "Groq", "AsyncGroq", "Mistral", "Together", "Cohere", "ClientV2", "GenerativeModel",
@@ -62,6 +63,7 @@ _PERSONA = re.compile(r"\bYou are\s+(?:(?P<name>[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*
 _MODEL_NAMES = {"chatgpt", "gpt", "claude", "gemini", "llama", "qwen", "deepseek", "mistral", "grok", "ai"}
 _SKIP_PATH = re.compile(r"(^|/)(examples?|docs?|scripts?/dev)(/|$)")
 MAX_AGENTS = 15
+MAX_CLIMB = 5  # wrappers followed from a model call up to the code that writes the prompt
 # a function named as an agent (research_agent, run_agent, AgentStep) - not one that merely contains the letters
 _AGENT_WORD = re.compile(r"(?i:(^|_)agents?($|_))|Agents?($|[A-Z_0-9])")
 # function names that say only that they call a model, not which agent they are
@@ -87,8 +89,11 @@ class _Fn:
     tools: list[str] = field(default_factory=list)  # tool schemas it defines and hands to the model
     wrapped: list[str] = field(default_factory=list)  # wrapper methods it reaches the model through
     cls_bases: int = 0  # how many base classes its class names (an override may be called by a framework)
+    cls_line: int = 0  # where its class starts
+    base_names: tuple[str, ...] = ()  # those bases, by their last name: Agent for class Planner(roles.Agent)
     picks: dict[str, set[str]] = field(default_factory=dict)  # callee -> prompt names it passes (prompt="reflect")
     self_calls: set[str] = field(default_factory=set)  # names it calls only as self.x() / cls.x()
+    writes_prompt: bool = False  # it spells a prompt out: a persona, a system message, a prompt it names as one
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -101,6 +106,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     direct: list[_Fn] = []
     imports: dict[str, _Imports] = {}  # file -> where its names come from
     referenced: set[str] = set()  # every name and attribute the project's code uses
+    mentions: dict[str, set[str]] = {}  # file -> the names and attributes its code uses
     for f in files:
         if f.path.suffix.lower() not in (".py", ".ipynb"):  # entry points named in pyproject, shell scripts, configs
             referenced.update(re.findall(r"[A-Za-z_]\w+", f.text))
@@ -117,16 +123,21 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         clients = _client_vars(tree, mods, names)
         chains = LLM_CHAINS + (LLM_CHAINS_IF_IMPORTED if _imports_llm(mods, names) else ())
         templates = _prompt_globals(tree)
+        mentions[f.rel] = {n.id if isinstance(n, ast.Name) else n.attr
+                           for n in ast.walk(tree) if isinstance(n, (ast.Name, ast.Attribute))}
         for fn in _functions(tree, f.rel):
             fns.append(fn)
             fn.via = _llm_call(fn.node, mods, names, clients, chains, in_class=fn.cls is not None)
             fn.own_prompt = _has_own_prompt(fn.node, templates)
+            fn.writes_prompt = fn.own_prompt and _writes_prompt(fn.node, templates)
             fn.tools = _tool_names(fn.node)
+            if fn.via and fn.cls and _NOT_MODEL.search(fn.cls):
+                fn.via = ""  # OpenAIEmbeddings, TokenizerClient: a class that is not a generating model's
             if fn.via:
                 direct.append(fn)
     # a class that builds its client in __init__ and calls it in other methods: those calls are what count
-    calling = {(fn.rel, fn.cls) for fn in direct if fn.cls and not fn.name.startswith("__")}
-    direct = [fn for fn in direct if not (fn.name.startswith("__") and (fn.rel, fn.cls) in calling)]
+    calling = {(fn.rel, fn.cls) for fn in direct if fn.cls and not _dunder(fn.name)}
+    direct = [fn for fn in direct if not (_dunder(fn.name) and (fn.rel, fn.cls) in calling)]
     # code nothing calls (an old completion helper left next to the chat one) is not part of any run
     # (a library's or an app's functions may be called from outside: only one beside a used model call is dropped)
     dead = {fn.key for fn in direct if _unused(fn, referenced)}
@@ -150,7 +161,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         return imports.get(c.rel, _Imports()).reaches(fn.name, fn.rel)
 
     def callers_of(fn: _Fn) -> list[_Fn]:
-        if fn.name == "<module>" or fn.name.startswith("__"):  # self.__init__() in reset() is not a model call
+        if fn.name == "<module>" or _dunder(fn.name):  # self.__init__() in reset() is not a model call
             return []
         seen, out = set(), []
         for c in callers.get(fn.name, []):
@@ -159,9 +170,14 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             # self._run() in a method of a class with no base is that class's own _run, not another class's
             if c.cls and fn.cls and c.cls != fn.cls and not c.cls_bases and fn.name in c.self_calls:
                 continue
+            # x.run() / x.generate() / x.chat() is anyone's method: it is this class's only where the caller's file
+            # names the class (builds it, imports it, annotates with it) or it is the class calling itself
+            if fn.cls and fn.name in _EVERYDAY and (c.rel, c.cls) != (fn.rel, fn.cls) and \
+                    fn.cls not in mentions.get(c.rel, ()):
+                continue
             # `if __name__ == "__main__": main()` does not make main plumbing - but a script whose top-level code
-            # writes the prompts and sends each through its own api_call() helper is the agent
-            if c.name == "<module>" and not (c.rel == fn.rel and c.own_prompt):
+            # writes the prompts and sends each through an api_call() helper (its own or an imported one) is the agent
+            if c.name == "<module>" and not c.own_prompt:
                 continue
             seen.add(c.key)
             out.append(c)
@@ -189,7 +205,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
         fronts = not picked and sum(1 for u in ups if not u.own_prompt and u.name != "<module>" and
                                     all(x.name == "<module>" for x in callers_of(u))) >= 2
         # a helper that only forwards someone else's prompt is plumbing: its callers are the agents
-        if ups and depth < 3 and not fronts and ((not fn.own_prompt and not _AGENT_WORD.search(fn.name)) or picked):
+        if ups and depth < MAX_CLIMB and not fronts and ((not fn.own_prompt and not _AGENT_WORD.search(fn.name)) or picked):
             if fn.cls and any((c.rel, c.cls) != (fn.rel, fn.cls) for c in ups):
                 services.add((fn.rel, fn.cls))
             # the runtime sees the wrapper (LLMService.stream_chat) when its caller runs it in another task
@@ -214,12 +230,30 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
     # a class named or built like an agent (SolverAgent(BaseAgent)) is one agent, whichever of its methods reach the
     # model and however much other code calls them; only a shared client class (LLMService) splits into its methods
     agent_classes = agent_class_names(files)
+
+    # a wrapper that only forwards the prompt it is handed stays plumbing when no caller of it was found (it is
+    # reached through an object a factory built, or called as engine(prompt)) - as long as other code that writes its
+    # own prompts was found. Ten provider engines are not ten agents; with nothing else, the one wrapper is the agent.
+    def owns(fn: _Fn) -> bool:
+        return fn.own_prompt or bool(_AGENT_WORD.search(fn.name)) or (fn.cls or "") in agent_classes
+
+    if any(owns(fn) for fn in sites.values()):
+        sites = {k: fn for k, fn in sites.items() if owns(fn) or not _receives_prompt(fn.node)}
+    heirs, stood_in_for = _inheriting_classes(sites, fns, set(callers))
     pipelines = _class_pipelines(list(sites.values()), fns)
     agents: dict[str, dict[str, Any]] = {}  # agent id -> agent
     meta: dict[str, dict[str, Any]] = {}  # agent id -> how it was found: its file, its functions, named after
     owner: dict[str, str] = {}  # function name -> agent id
     role_edges: list[tuple[str, str]] = []
+    for (rel, cls), (line, doc, via) in sorted(heirs.items()):  # Technician(BaseNode), Validator(BaseNode)
+        aid = f"{rel}:{cls}"
+        if aid not in agents and len(agents) < MAX_AGENTS:
+            agents[aid] = {"name": cls, "role": f"calls the LLM ({via})", "description": doc, "tools": [],
+                           "file": rel, "line": line, "aliases": [cls]}
+            meta[aid] = {"rel": rel, "fns": set(), "named": "class", "cls": cls, "heir": True}
     for fn in sorted(sites.values(), key=lambda s: (s.rel, s.line)):
+        if fn.cls in stood_in_for:
+            continue  # its subclasses are on the map in its place
         stem = _stem(fn.rel)
         pipe = pipelines.get((fn.rel, fn.cls or ""))
         if pipe:  # a step of a class's own pipeline (a method of it that writes no prompt joins its first step)
@@ -233,7 +267,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
                     continue
                 agent = agents[aid] = {"name": name, "role": f"a step of {fn.cls} ({fn.via})", "tools": [],
                                        "description": step.doc, "file": fn.rel, "line": step.line, "aliases": []}
-                meta[aid] = {"rel": fn.rel, "fns": set(), "named": "step"}
+                meta[aid] = {"rel": fn.rel, "fns": set(), "named": "step", "cls": fn.cls or ""}
             meta[aid]["fns"].add(fn.name)
             agent["aliases"] += [a for a in aliases if a not in agent["aliases"]]
             agent["tools"] += [t for t in fn.tools if t not in agent["tools"]]
@@ -260,7 +294,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
                     agents[rid] = {"name": r, "role": f"a role {fn.name}() gives {fn.via}()", "description": "",
                                    "tools": list(fn.tools), "file": fn.rel, "line": fn.line,
                                    "aliases": [r, f"{fn.name}.{r}"]}
-                    meta[rid] = {"rel": fn.rel, "fns": {fn.name}, "named": "role"}
+                    meta[rid] = {"rel": fn.rel, "fns": {fn.name}, "named": "role", "cls": fn.cls or ""}
                 if rid in agents:
                     ids.append(rid)
             order = _ordered_roles(fn, roles, ids)
@@ -275,7 +309,7 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
             agent = agents[aid] = {"name": name, "role": role or f"calls the LLM ({fn.via})",
                                    "description": fn.cls_doc or fn.doc,
                                    "tools": [], "file": fn.rel, "line": fn.line, "aliases": []}
-            meta[aid] = {"rel": fn.rel, "fns": set(), "named": named}
+            meta[aid] = {"rel": fn.rel, "fns": set(), "named": named, "cls": fn.cls or ""}
         meta[aid]["fns"].add(fn.name)
         agent["aliases"] += [a for a in aliases if a not in agent["aliases"]]
         agent["tools"] += [t for t in fn.tools if t not in agent["tools"]]
@@ -360,7 +394,29 @@ def find(files: list[SourceFile]) -> dict[str, Any]:
                         link(order[-1], mine, "then")
     steps = {cls: [agents[owner[f.name]]["name"] for f in pipe if owner.get(f.name) in agents]
              for (_, cls), pipe in pipelines.items()}
+    cls_prompt = {(f.rel, f.cls) for f in fns if f.cls and f.writes_prompt}
+    fn_prompt = {(f.rel, f.cls or "", f.name) for f in fns if f.writes_prompt}
+    for aid, a in agents.items():  # how each was found (dropped by blueprint.normalize)
+        m = meta.get(aid, {})
+        a["_kind"], a["_fns"], a["_cls"] = m.get("named", ""), sorted(m.get("fns", ())), m.get("cls", "")
+        rel, cls = m.get("rel", ""), m.get("cls", "")
+        a["_bases"] = sorted({b for f in fns if f.cls == cls and f.rel == rel for b in f.base_names}) if cls else []
+        a["_used"] = bool(({cls} if cls else set(m.get("fns", ()))) & referenced)
+        a["_prompt"] = ((rel, cls) in cls_prompt if cls and m.get("named") in ("class", "persona") else
+                        any((rel, cls, f) in fn_prompt for f in m.get("fns", ()))) or m.get("named") in ("step", "role") \
+            or cls in agent_classes or bool(m.get("heir"))
     return {"agents": list(agents.values()), "edges": edges, "pipelines": steps}
+
+
+# method names so common that a call to one says nothing about whose method runs
+_EVERYDAY = {"run", "arun", "call", "acall", "forward", "invoke", "ainvoke", "chat", "achat", "generate", "agenerate",
+             "step", "astep", "execute", "process", "main", "query", "predict", "complete", "ask", "reply", "respond",
+             "act", "plan", "start", "stream", "handle", "send", "get", "create", "fill", "apply", "parse", "render"}
+
+
+def _dunder(name: str) -> bool:
+    """__init__, __call__ - not a name-mangled private method (__request)."""
+    return name.startswith("__") and name.endswith("__")
 
 
 def _calls_in_run_order(node: ast.AST):
@@ -393,13 +449,48 @@ def _prompt_names(node: ast.AST) -> list[str]:
     return out
 
 
+def _inheriting_classes(sites: dict, fns: list[_Fn],
+                        called: set[str]) -> tuple[dict[tuple[str, str], tuple[int, str, str]], set[str]]:
+    """A base class that writes the prompt and calls the model, but is never built itself, is its subclasses' shared
+    engine: BaseNode asks the model, and Architect(BaseNode), Technician(BaseNode) and Validator(BaseNode) are what a
+    run creates. Each subclass with no model call of its own stands as an agent in the base's place. Returns
+    ({(file, class): (line, docstring, how the base reaches the model)}, the bases stood in for)."""
+    bases: dict[str, set[str]] = {}
+    where: dict[str, _Fn] = {}
+    for f in fns:
+        if f.cls:
+            bases.setdefault(f.cls, set()).update(f.base_names)
+            where.setdefault(f.cls, f)
+    have = {fn.cls for fn in sites.values() if fn.cls}
+    out: dict[tuple[str, str], tuple[int, str, str]] = {}
+    stood_in_for: set[str] = set()
+
+    def inherits(cls: str, base: str, seen: frozenset = frozenset()) -> bool:
+        return base in bases.get(cls, ()) or any(b not in seen and inherits(b, base, seen | {cls}) for b in bases.get(cls, ()))
+
+    for fn in sites.values():
+        base = fn.cls
+        if not base or base in called or not fn.own_prompt:  # built directly somewhere: an agent in its own right
+            continue
+        subs = [c for c in bases if c != base and inherits(c, base)]
+        leaves = [c for c in subs if not any(inherits(o, c) for o in subs if o != c)]
+        if len(leaves) < 2:
+            continue
+        stood_in_for.add(base)
+        for c in leaves:
+            if c not in have:
+                f = where[c]
+                out[(f.rel, c)] = (f.cls_line or f.line, f.cls_doc, fn.via)
+    return out, stood_in_for
+
+
 def _class_pipelines(sites: list[_Fn], fns: list[_Fn]) -> dict[tuple[str, str], list[_Fn]]:
     """A class that runs three or more of its own differently prompted methods one after another (sub-queries, then
     search, then reflection, then a summary) is a pipeline: each prompted method is a step of its own on the map. A
     class whose methods share one prompt, or that nothing in it runs in sequence, stays one agent."""
     by_cls: dict[tuple[str, str], list[_Fn]] = {}
     for fn in sites:
-        if fn.cls and fn.own_prompt and not fn.name.startswith("__"):
+        if fn.cls and fn.own_prompt and not _dunder(fn.name):
             by_cls.setdefault((fn.rel, fn.cls), []).append(fn)
     out = {}
     for key, steps in by_cls.items():
@@ -407,16 +498,62 @@ def _class_pipelines(sites: list[_Fn], fns: list[_Fn]) -> dict[tuple[str, str], 
         if len(steps) < 3 or len(prompts) < 3:
             continue
         names = {fn.name for fn in steps}
-        runner = any((f.rel, f.cls) == key and len(names & {n for n, _ in f.calls} - {f.name}) >= 2 for f in fns)
+        own = {f.name: getattr(f.node, "body", []) for f in fns if (f.rel, f.cls) == key and f.name not in names}
+        runner = any((f.rel, f.cls) == key and (f.name in names) + len(
+            _on_one_path(getattr(f.node, "body", []), names - {f.name}, own)) >= 3 for f in fns)
         if runner:
             out[key] = sorted(steps, key=lambda f: f.line)
+    return out
+
+
+def _on_one_path(stmts: list[ast.stmt], names: set[str], own: dict[str, list[ast.stmt]] | None = None,
+                 depth: int = 0) -> set[str]:
+    """Which of the methods `names` one run through these statements can call - through the class's other methods
+    (`own`: name -> body) too. The branches of an if / match are alternatives (the one calling most counts), and so
+    is what follows an `if ...: return`: a run() that picks one step per call by the state it is in calls them all,
+    but never one after another."""
+    def called(node: ast.AST) -> set[str]:
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call):
+                name = n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id if isinstance(n.func, ast.Name) else ""
+                if name in names:
+                    out.add(name)
+                elif own and name in own and depth < 2:  # self._research_loop(): what that method runs
+                    out |= _on_one_path(own[name], names, {k: v for k, v in own.items() if k != name}, depth + 1)
+        return out
+
+    out: set[str] = set()
+    for i, st in enumerate(stmts):
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(st, ast.If):
+            body, other = _on_one_path(st.body, names, own, depth), _on_one_path(st.orelse, names, own, depth)
+            leaves = bool(st.body) and isinstance(st.body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break))
+            if leaves and not st.orelse:  # what comes after is the other branch
+                rest = _on_one_path(stmts[i + 1:], names, own, depth)
+                return out | called(st.test) | (body if len(body) >= len(rest) else rest)
+            out |= called(st.test) | (body if len(body) >= len(other) else other)
+        elif isinstance(st, ast.Match):
+            out |= called(st.subject) | max((_on_one_path(c.body, names, own, depth) for c in st.cases), key=len, default=set())
+        elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+            out |= called(st.iter if isinstance(st, (ast.For, ast.AsyncFor)) else st.test)
+            out |= _on_one_path(st.body, names, own, depth) | _on_one_path(st.orelse, names, own, depth)
+        elif isinstance(st, (ast.With, ast.AsyncWith)):
+            for item in st.items:
+                out |= called(item.context_expr)
+            out |= _on_one_path(st.body, names, own, depth)
+        elif isinstance(st, ast.Try) or type(st).__name__ == "TryStar":
+            out |= _on_one_path(st.body, names, own, depth) | _on_one_path(st.orelse, names, own, depth) | _on_one_path(st.finalbody, names, own, depth)
+        else:
+            out |= called(st)
     return out
 
 
 def _unused(fn: _Fn, referenced: set[str]) -> bool:
     """Neither called nor referenced anywhere in the project, nor registered by a decorator. A method only counts
     when the project uses its class but never that method, and the class has no base it could override."""
-    if fn.name == "<module>" or fn.name.startswith("__") or fn.name in referenced or fn.cls_bases:
+    if fn.name == "<module>" or _dunder(fn.name) or fn.name in referenced or fn.cls_bases:
         return False
     if fn.cls and fn.cls not in referenced:  # a class nobody creates here may be the project's API: keep it
         return False
@@ -677,7 +814,41 @@ def _client_vars(tree: ast.AST, mods, names) -> dict[str, str]:
                 var = el.id if isinstance(el, ast.Name) else el.attr if isinstance(el, ast.Attribute) else None
                 if var and not _NOT_MODEL.search(var):
                     out[var] = origin
+    # ...and one handed in: def __init__(self, llm: BaseChatModel), planner: ChatOpenAI | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                kind = _model_type(a.annotation)
+                if kind and not _NOT_MODEL.search(a.arg):
+                    out.setdefault(a.arg, kind)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, (ast.Name, ast.Attribute)):
+            kind = _model_type(node.annotation)
+            var = node.target.id if isinstance(node.target, ast.Name) else node.target.attr
+            if kind and not _NOT_MODEL.search(var):
+                out.setdefault(var, kind)
+    for node in ast.walk(tree):  # self.planner = planner
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id in out:
+            for t in node.targets:
+                if isinstance(t, ast.Attribute) and not _NOT_MODEL.search(t.attr):
+                    out.setdefault(t.attr, out[node.value.id])
     return out
+
+
+# what a model is typed as when it is passed around: BaseChatModel, BaseLanguageModel, a project's own ChatLLM
+_MODEL_TYPE = re.compile(r"^Base(Chat|Language)Model$|^BaseLLM$|(ChatModel|LanguageModel|LLM)$")
+
+
+def _model_type(annotation: ast.AST | None) -> str:
+    """The model class an annotation names (BaseChatModel, Optional[ChatOpenAI], "AzureChatOpenAI | None"), or ""."""
+    if annotation is None:
+        return ""
+    for n in ast.walk(annotation):
+        names = [n.id] if isinstance(n, ast.Name) else [n.attr] if isinstance(n, ast.Attribute) else \
+            re.findall(r"\w+", n.value) if isinstance(n, ast.Constant) and isinstance(n.value, str) else []
+        for name in names:
+            if name in CLIENT_CLASSES or _MODEL_TYPE.search(name):
+                return name
+    return ""
 
 
 def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=False) -> str:
@@ -692,6 +863,10 @@ def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=F
                 return chain
         if len(parts) > 1 and root in mods and _is_llm_module(mods[root]) and last in LLM_ENTRY:
             return f"{mods[root]}.{last}"  # litellm.completion, ollama.chat
+        if isinstance(call.func, ast.Attribute) and last in LLM_USE and isinstance(call.func.value, ast.Call):
+            built = _dotted(call.func.value.func).split(".")[-1]  # ChatOpenAI(model=...).invoke(messages)
+            if built in CLIENT_CLASSES or _CHAT_MODEL.match(built):
+                return f"{built}.{last}"
         if len(parts) == 1 and root in names and _is_llm_module(names[root][0]) and names[root][1] in LLM_ENTRY:
             return f"{names[root][0]}.{names[root][1]}"  # from mlx_lm import generate; generate(...)
         if in_class and last in CLIENT_CLASSES and len(parts) <= 2:
@@ -704,11 +879,88 @@ def _llm_call(node: ast.AST, mods, names, clients, chains=LLM_CHAINS, in_class=F
             weak = weak or (f"{origin}.{last}" if last != var else origin)
     if weak and not _embeds(node):
         return weak
-    return "" if weak else _http_llm_call(node)
+    return "" if weak else _http_llm_call(node) or _named_llm_call(node)
 
 
 # LangChain chat models are callable: llm(messages) on ChatOpenAI / AzureChatOpenAI / ChatAnthropic runs the model
 _CHAT_MODEL = re.compile(r"^(Azure)?Chat[A-Z]")
+
+# -- model calls recognised by what they do, whatever library or wrapper they go through --------------------------
+# A project that reaches its model through its own engine class, an object it was handed, or a package this module
+# has never heard of still writes `self.llm(prompt)`, `llm_engine.generate(messages)` or `call_gpt(prompt)`: the
+# thing called is named as a model, and it is asked to generate.
+_MODEL_WORD = r"llm[a-z0-9]*|[a-z0-9]*llms?|lm|gpt[a-z0-9]*|chatgpt|openai|anthropic|claude|gemini|ollama|chat_?model|language_?model"
+# an object named as a language model: llm, self.llm_engine, planner_llm, chat_model, gpt4, base_lm
+_MODEL_NAME = re.compile(rf"(^|_)({_MODEL_WORD})(_|$)", re.I)
+# ...or as something that may be one: only with a prompt in the call (model.predict(X) is scikit-learn's)
+_MAYBE_MODEL_NAME = re.compile(r"(^|_)(model|client|engine|backend|api|generator)s?$", re.I)
+_GENERATE = {"invoke", "ainvoke", "stream", "astream", "batch", "abatch", "generate", "agenerate", "chat", "achat",
+             "complete", "acomplete", "completion", "acompletion", "predict", "apredict", "predict_messages",
+             "apredict_messages", "generate_prompt", "agenerate_prompt", "call", "acall", "ask", "aask", "query",
+             "aquery", "respond", "reply", "prompt", "run", "arun", "generate_text", "generate_response",
+             "get_response", "get_completion", "chat_completion", "text_completion", "create_completion",
+             "create_chat_completion", "generate_content", "send_message", "infer", "inference", "request"}
+# a helper named for what it does: call_llm, ask_gpt, query_openai_api, llm_call, gpt_chat, get_completion,
+# get_llm_response - but not one that only hands out the model (get_llm, load_llm, create_openai_client)
+_CALL_VERB = r"a?(?:call|ask|query|run|invoke|prompt|chat|send|request|infer|exec|execute)"
+_MODEL_HELPER = re.compile(
+    rf"^_*{_CALL_VERB}_?(?:with_|to_|the_)?(?:{_MODEL_WORD})(_\w+)?$"
+    rf"|^_*(?:{_MODEL_WORD})_(?:call|chat|complete|completions?|generate|query|response|api|request|infer|"
+    r"inference|predict|invoke|run)(_\w+)?$"
+    rf"|^_*a?(?:get|fetch|generate|create|request)_?(?:(?:{_MODEL_WORD})_)?(?:chat_?)?completions?(_\w+)?$"
+    rf"|^_*a?(?:get|fetch|generate)_(?:{_MODEL_WORD})_(?:response|answer|reply|output|result)s?(_\w+)?$", re.I)
+_MAYBE_MODEL_HELPER = re.compile(
+    rf"^_*{_CALL_VERB}_?(?:with_|to_|the_)?(?:model|ai|api)(_response|_output|_api)?$"
+    r"|^_*a?(?:get|generate)_(?:model|ai)_(?:response|answer|reply|output)$", re.I)
+_HANDS_OUT = re.compile(r"^_*(get|load|init|initiali[sz]e|create|build|setup|set|make|new|configure|resolve|select|"
+                        r"choose|register|default|from|is|has|check|validate|parse|format|count|log|save|update|"
+                        r"close|reset|patch|mock|wrap|with|use|pick|find|list|test|ensure|require|prepare|start|"
+                        r"stop|shutdown)_", re.I)
+_PROMPT_WORD = re.compile(r"prompt|messages|msgs|instruction|system|question|query|history|conversation|dialog", re.I)
+_NOT_GENERATION = re.compile(r"embed|token|encode|decode|count|config|cache|logger|parser|schema|cost|price|usage", re.I)
+
+
+def _prompt_given(call: ast.Call) -> bool:
+    """Is the call handed a prompt: an argument named or keyed as one, role/content messages, or a paragraph of text?"""
+    for k in call.keywords:
+        if k.arg and _PROMPT_WORD.search(k.arg):
+            return True
+    for arg in [*call.args, *(k.value for k in call.keywords)]:
+        for n in ast.walk(arg):
+            ident = n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else ""
+            if ident and _PROMPT_WORD.search(ident):
+                return True
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and (
+                    n.value in ("role", "content") or (len(n.value) >= 40 and " " in n.value)):
+                return True
+    return False
+
+
+def _named_llm_call(node: ast.AST) -> str:
+    """A model call recognised by its names: an object named as a model that is called or asked to generate
+    (self.llm(prompt), llm_engine.generate(messages), self.chat_model.apredict(...)), or a helper named for calling
+    one (call_llm(prompt), ask_gpt(...)). Names that only may be a model (client, model, engine) count when the call
+    carries a prompt."""
+    for call in _own_calls(node):
+        parts = _dotted(call.func).replace("()", "").replace("[]", "").split(".")
+        last = parts[-1]
+        if not last or last == "?" or last[:1].isupper() or _NOT_GENERATION.search(last):
+            continue  # a constructor, or bookkeeping around the model (llm.get_num_tokens, llm_cache.get)
+        if _MODEL_HELPER.match(last):
+            return last
+        if _MAYBE_MODEL_HELPER.match(last) and _prompt_given(call):
+            return last
+        owner = [p for p in parts[:-1] if p not in ("self", "cls", "?")]
+        if any(_NOT_GENERATION.search(p) for p in owner):
+            continue
+        if last in _GENERATE and owner:  # llm.invoke(...), self.planner_llm.bind_tools(tools).ainvoke(...)
+            if any(_MODEL_NAME.search(p) for p in owner) or (
+                    _MAYBE_MODEL_NAME.search(owner[-1]) and _prompt_given(call)):
+                return f"{owner[-1]}.{last}"
+        elif not owner and not _HANDS_OUT.match(last) and (call.args or call.keywords):  # llm(...), self.engine(...)
+            if _MODEL_NAME.search(last) or (_MAYBE_MODEL_NAME.search(last) and _prompt_given(call)):
+                return last
+    return ""
 
 
 _EMBED_CALLS = re.compile(r"(^|\.)(embeddings?\.create|Embedding\.create|embed|embed_content|embed_documents|embed_query|"
@@ -790,9 +1042,46 @@ def _prompt_globals(tree: ast.AST) -> set[str]:
     return out
 
 
+_SYSTEM_MESSAGE = {"SystemMessage", "SystemMessagePromptTemplate", "SystemPromptPart", "SystemPrompt"}
+_SYSTEM_KWARGS = ("system", "system_prompt", "system_message", "system_instruction", "instructions")
+
+
+def _composes_system_message(node: ast.AST) -> bool:
+    """SystemMessage(content=text), {"role": "system", "content": text} or system=text, where `text` is something
+    this code fetched itself - read from a prompt file, rendered from a template, looked up - rather than was handed:
+    one of its own variables, set from a call or a string, not a parameter and not an attribute of its object. The
+    prompt's wording is not in the code, but this is where it is chosen."""
+    params: set[str] = set()
+    fetched: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            params |= {a.arg for a in [*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs]}
+        elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.Call, ast.Await, ast.JoinedStr, ast.Constant, ast.BinOp)):
+            fetched |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+    fetched -= params
+
+    def own(v: ast.AST | None) -> bool:
+        return isinstance(v, ast.Name) and v.id in fetched
+
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and _dotted(n.func).split(".")[-1] in _SYSTEM_MESSAGE:
+            if own(next((k.value for k in n.keywords if k.arg == "content"), n.args[0] if n.args else None)):
+                return True
+        elif isinstance(n, ast.Dict):
+            fields = {k.value: v for k, v in zip(n.keys, n.values) if isinstance(k, ast.Constant)}
+            role = fields.get("role")
+            if isinstance(role, ast.Constant) and role.value in ("system", "developer") and own(fields.get("content")):
+                return True
+        elif isinstance(n, ast.keyword) and n.arg in _SYSTEM_KWARGS and own(n.value):
+            return True
+    return False
+
+
 def _has_own_prompt(node: ast.AST, templates: set[str] = frozenset()) -> bool:
     """Does the function write its own prompt (text, f-strings, a *_PROMPT constant) or only pass one through?"""
     skip = _not_prompt_text(node)
+    if _composes_system_message(node):
+        return True
     if _receives_prompt(node):
         # the prompt comes in as an argument: tool schemas and error text around it are not a prompt of its own,
         # only a system message it adds itself is (LLMService.stream_chat(messages) is a wrapper)
@@ -811,6 +1100,49 @@ def _has_own_prompt(node: ast.AST, templates: set[str] = frozenset()) -> bool:
                 isinstance(n.value, (ast.Constant, ast.JoinedStr)):
             return True
     return chars >= 24
+
+
+_PERSONA_TEXT = re.compile(r"\b(You are|You\'re an?|Your (task|job|role|goal|mission) is|You will (be|act|play)|"
+                           r"Act as|You should act|As an? [\w\- ]{3,40}, you|Please act as)\b")
+
+
+def _writes_prompt(node: ast.AST, templates: set[str] = frozenset()) -> bool:
+    """Does this code spell a prompt out, beyond holding some text? A persona ("You are a ...", "Your task is ..."),
+    a system or user message with its own wording, a paragraph it names as a prompt (prompt = f\"\"\"...\"\"\",
+    instructions="..."), or a prompt constant / template it fills in (REVIEW_PROMPT, prompts.PLAN_TEMPLATE)."""
+    skip = _not_prompt_text(node)
+    if _composes_system_message(node):
+        return True
+
+    def paragraph(value: ast.AST | None) -> bool:
+        return value is not None and any(isinstance(n, ast.Constant) and isinstance(n.value, str) and
+                                         len(n.value) >= 30 and " " in n.value for n in ast.walk(value))
+
+    for n in ast.walk(node):
+        if id(n) in skip:
+            continue
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and len(n.value) >= 40 and \
+                _PERSONA_TEXT.search(n.value):
+            return True
+        if isinstance(n, (ast.Name, ast.Attribute)):
+            ident = n.id if isinstance(n, ast.Name) else n.attr
+            if _PROMPT_NAME.search(ident) and (ident.isupper() or ident in templates):
+                return True
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            names = [t.id if isinstance(t, ast.Name) else t.attr for t in targets if isinstance(t, (ast.Name, ast.Attribute))]
+            if any(_PROMPT_NAME.search(x) or _PROMPT_WORD.search(x) for x in names) and paragraph(n.value):
+                return True
+        elif isinstance(n, ast.keyword) and n.arg and (_PROMPT_NAME.search(n.arg) or _PROMPT_WORD.search(n.arg)) \
+                and paragraph(n.value):
+            return True
+        elif isinstance(n, ast.Dict):
+            fields = {k.value: v for k, v in zip(n.keys, n.values) if isinstance(k, ast.Constant)}
+            role = fields.get("role")
+            if isinstance(role, ast.Constant) and role.value in ("system", "developer", "user") and \
+                    paragraph(fields.get("content")):
+                return True
+    return False
 
 
 def _receives_prompt(node: ast.AST) -> bool:
@@ -898,6 +1230,8 @@ def _functions(tree: ast.Module, rel: str) -> list[_Fn]:
         fn = _Fn(rel, cls, node.name, node.lineno, first_line(node), node)
         fn.cls_doc = first_line(cls_node) if cls_node is not None else ""
         fn.cls_bases = len(cls_node.bases) if cls_node is not None else 0
+        fn.cls_line = cls_node.lineno if cls_node is not None else 0
+        fn.base_names = tuple(_dotted(b).replace("[]", "").split(".")[-1] for b in cls_node.bases) if cls_node is not None else ()
         fn.calls, fn.picks = _calls_and_picks(node)
         fn.self_calls = _self_calls(node)
         out.append(fn)

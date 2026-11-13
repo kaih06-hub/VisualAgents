@@ -200,7 +200,10 @@ def sets():
     from ground_truth_set4 import GT4
     from ground_truth_set5 import GT5
     from ground_truth_set6 import GT6
-    return {"set1": GT, "set2": GT2, "set3": GT3, "set4": GT4, "set5": GT5, "set6": GT6}
+    from ground_truth_set10 import GT10  # sets 7-9 live on the dev-refinement branch
+    from ground_truth_set11 import GT11
+    return {"set1": GT, "set2": GT2, "set3": GT3, "set4": GT4, "set5": GT5, "set6": GT6, "set10": GT10,
+            "set11": GT11}
 
 
 if __name__ == "__main__":

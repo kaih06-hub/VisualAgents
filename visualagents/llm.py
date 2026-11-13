@@ -34,7 +34,8 @@ _DOTENV_VARS = {
 _ROUTING_VARS = {"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "VISUALAGENTS_PROVIDER", "GOOGLE_GENAI_USE_VERTEXAI",
                  "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"}
 # Models that accept the server-side refusal fallback (beta server-side-fallback-2026-07-01).
-_FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
+_FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-fable-5-1",
+                    "claude-sonnet-5-5")
 _NO_EFFORT = ("claude-3", "claude-haiku-4", "claude-sonnet-4-5", "claude-sonnet-4-0", "claude-opus-4-0", "claude-opus-4-1")
 
 
@@ -52,7 +53,7 @@ def load_dotenv_keys(project: Path) -> list[str]:
     for candidate in dict.fromkeys((project / ".env", Path.cwd().resolve() / ".env")):
         in_project = candidate.parent == project or project in candidate.parent.parents
         try:
-            lines = candidate.read_text(encoding="utf-8").splitlines()
+            lines = candidate.read_text(encoding="utf-8-sig").splitlines()
         except OSError:
             continue
         for line in lines:

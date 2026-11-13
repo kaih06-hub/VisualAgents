@@ -25,6 +25,9 @@ SAME_AGENT = {"clone", "copy", "with_config", "with_options", "bind", "bind_tool
 CHATS = {"initiate_chat", "a_initiate_chat"}
 # an agent's own model, called from outside it: self.action_agent.llm(messages)
 MODEL_ATTR = __import__("re").compile(r"^_?(llm|lm|model|chat_model|chat_llm|client)$")
+# methods that look at or set up an agent rather than run it
+ACCESSOR = __import__("re").compile(r"^(_|get_|set_|is_|has_|to_|from_|add_|remove_|register|load|save|close|reset|"
+                                    r"clear|configure|setup|init|update_|log|describe|validate|name$|copy$|clone$)")
 MAX_DEPTH = 6
 BUDGET = 40_000  # calls looked at, per project
 MAX_EDGES = 40
@@ -76,11 +79,15 @@ def link(c: Any) -> None:
                         methods[(node.name, m.name)] = fn
                         funcs.setdefault(m.name, []).append(fn)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) \
-                    and isinstance(node.value.func, ast.Name):
-                for t in node.targets:
+            if isinstance(node, ast.Assign):
+                # self.writer = Writer(...), self.writer = shared_writer or Writer(...), ... = Writer() if own else None
+                value = node.value
+                options = value.values if isinstance(value, ast.BoolOp) else [value.body, value.orelse] \
+                    if isinstance(value, ast.IfExp) else [value]
+                built = [o.func.id for o in options if isinstance(o, ast.Call) and isinstance(o.func, ast.Name)]
+                for t in node.targets if built else ():
                     if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self":
-                        attr_cls.setdefault(t.attr, set()).add(node.value.func.id)
+                        attr_cls.setdefault(t.attr, set()).update(built)
     bases: dict[str, list[str]] = {}  # project class -> the names of its bases
     for tree in c.trees.values():
         for node in ast.walk(tree):
@@ -102,6 +109,13 @@ def link(c: Any) -> None:
                        and asks_model(cls, n.func.attr, seen | {(cls, method)})
                        for n in ast.walk(own.node))
         return any(asks_model(b, method, seen | {cls}) for b in bases.get(cls, ()))
+
+    def model_known(cls: str | None, seen: frozenset = frozenset()) -> bool:
+        """Is it known which methods of `cls` (or of the project classes it builds on) reach a model? A class that
+        runs on a framework's agent object (self.agent = CodeAgent(...)) reaches one in ways this pass cannot see."""
+        if not cls or cls in seen:
+            return False
+        return bool(asks.get(cls)) or any(model_known(b, seen | {cls}) for b in bases.get(cls, ()))
 
     project_classes = {cls for cls, _ in methods}
     attr_any = {a: next(iter(ks)) for a, ks in attr_cls.items() if len(ks) == 1}
@@ -245,7 +259,8 @@ def link(c: Any) -> None:
             owner_cls = attr_any.get(f.value.attr) if isinstance(f.value, ast.Attribute) and \
                 isinstance(f.value.value, ast.Name) and f.value.value.id == "self" else \
                 local_cls(fn, f.value.id) if isinstance(f.value, ast.Name) else None
-            if owner_cls and (asks_model(owner_cls, f.attr) or MODEL_ATTR.match(f.attr)):
+            if owner_cls and (asks_model(owner_cls, f.attr) or MODEL_ATTR.match(f.attr)
+                              or (not model_known(owner_cls) and not ACCESSOR.match(f.attr))):
                 me = agent_of(f.value, env, fn)
                 if me:
                     return [me]
@@ -285,6 +300,10 @@ def link(c: Any) -> None:
                             ctor_of[k][t.id] = st.value.func.id
         return ctor_of[k].get(var)
 
+    def host_of(fn: _Fn) -> str | None:
+        """The agent whose own code `fn` is: a method of the class that is (or builds) that agent."""
+        return (class_agent.get(fn.cls) or names.get(fn.cls)) if fn.cls else None
+
     memo: dict[tuple[int, frozenset], set[str]] = {}
     reach: set[int] = set()  # functions that run an agent, themselves or through what they call
 
@@ -311,9 +330,17 @@ def link(c: Any) -> None:
                     add(owner, t, "as tool", True)
             found = uses(call, env, fn)
             if found:
+                host = host_of(fn)
+                if host and host not in found and asks.get(fn.cls or ""):
+                    # the code running these agents is an agent's own, and it asks the model itself: a supervisor
+                    # that hands each its turn and gets the work back, not a stage in a chain
+                    for u in found:
+                        add(host, u, "delegates", True)
+                        add(u, host, "reports", True)
+                    continue
                 for u in found:
-                    for x in frontier:
-                        add(x, u, "then")
+                    for x in frontier or ({host} if host and host != u else ()):  # a runner starts its first agent
+                        add(x, u, "then" if frontier else "starts")
                     frontier = {u}
                 continue
             target = callee(call, fn) if depth < MAX_DEPTH else None
