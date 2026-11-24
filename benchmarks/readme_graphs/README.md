@@ -35,6 +35,22 @@ any scan, covers TradingAgents, gpt-researcher's multi-agent team, Voyager, Agen
 concierge, an ADK loan desk, TaskWeaver, Enterprise Deep Research and XAgent. Sets 1-6 on main and dev-refinement are in
 `results-set6-2026-10-22.json`; the write-up is `REPORT-set6-2026-10-22.md`.
 
+A seventh set of ten (`ground_truth_set7.py`, `run_set7.sh`, `score.py <out> set7`), written from the README diagrams
+before any scan, covers deer-flow 1.x, MetaGPT, ChatDev 1.0, OWL, DeepCode, RD-Agent, an ADK due-diligence team, a
+CrewAI Flow, ChatEval and AgentClinic. Main against dev-refinement, with sets 1-6 re-scored, is in
+`results-set7-2026-10-24.json`; the write-up is `REPORT-set7-2026-10-24.md`.
+
+An eighth set of ten (`ground_truth_set8.py`, `run_set8.sh`, `score.py <out> set8`), written from the README diagrams
+before any scan, covers ai-hedge-fund, Gemini's fullstack LangGraph quickstart, Open Deep Research, AgentVerse,
+Paper2Poster, AI-Researcher, Mobile-Agent-v2, MapCoder, AutoKaggle and OctoTools. Before/after on dev-refinement, with
+sets 1-7 re-scored, is in `results-set8-2026-10-25.json`; the write-up is `REPORT-set8-2026-10-25.md`.
+
+A ninth set of ten (`ground_truth_set9.py`, `run_set9.sh`, `score.py <out> set9`), written from the README diagrams
+before any scan, covers GPT Newspaper, LangChain's agents-from-scratch and memory-agent, Contoso Creative Writer,
+Reflexion, LLMCompiler, AutoSurvey, Self-Refine, MACRec and The AI Scientist. Before/after on dev-refinement, with sets
+1-8 re-scored, is in `results-set9-2026-10-26.json`; the write-up is `REPORT-set9-2026-10-26.md`. The dev-refinement
+rules those three sets were tuned with were not merged: on the held-out sets below they scored the same as `main`.
+
 ## Held-out sets 10, 11 and 12: how the scanner does on projects it was not tuned on
 
 Sets 1-9 were each scored, then the scanner was changed until they scored well, so their numbers say little about a

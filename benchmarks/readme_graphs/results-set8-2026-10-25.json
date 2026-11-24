@@ -1,0 +1,620 @@
+{
+ "date": "2026-10-25",
+ "mode": "static",
+ "before": "dev-refinement d3d703a (set 7 work, not yet on main)",
+ "after": "dev-refinement (this change)",
+ "set8": {
+  "before": {
+   "projects": {
+    "ai-hedge-fund": {
+     "node_recall": 0.2,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.0,
+     "edge_precision": 0.0,
+     "missed_nodes": [
+      "Backtests",
+      "PortfolioConstruction",
+      "RiskChecks",
+      "SimulatedExecution"
+     ],
+     "missed_edges": [
+      [
+       "InvestmentAnalysis",
+       "PortfolioConstruction"
+      ],
+      [
+       "PortfolioConstruction",
+       "RiskChecks"
+      ],
+      [
+       "RiskChecks",
+       "SimulatedExecution"
+      ],
+      [
+       "SimulatedExecution",
+       "Backtests"
+      ]
+     ],
+     "wrong": []
+    },
+    "gemini-fullstack-langgraph": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 1.0,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [],
+     "wrong": []
+    },
+    "open_deep_research": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.667,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.8,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "SubAgents",
+       "Supervisor"
+      ]
+     ],
+     "wrong": []
+    },
+    "AgentVerse": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.25,
+     "node_precision_lenient": 0.972,
+     "edge_recall": 0.75,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Evaluation",
+       "Recruitment"
+      ]
+     ],
+     "wrong": []
+    },
+    "Paper2Poster": {
+     "node_recall": 0.75,
+     "node_recall_code": 0.75,
+     "node_precision_strict": 0.353,
+     "node_precision_lenient": 0.529,
+     "edge_recall": 0.5,
+     "edge_precision": 1.0,
+     "missed_nodes": [
+      "Parser"
+     ],
+     "missed_edges": [
+      [
+       "Parser",
+       "Planner"
+      ],
+      [
+       "Planner",
+       "Painter"
+      ]
+     ],
+     "wrong": [
+      "coordinator_agent",
+      "create_new_agent",
+      "agent",
+      "assistant_agent",
+      "user_agent",
+      "summarize_agent",
+      "docstring_assistant",
+      "synthesis_agent",
+      "t2p_agent",
+      "p2p_agent",
+      "hugging_face_tool_agent",
+      "role_assignment_agent",
+      "search_agent",
+      "multi_hop_generator_agent",
+      "knowledge_graph_agent",
+      "deductive_reasoner_agent"
+     ]
+    },
+    "AI-Researcher": {
+     "node_recall": 0.667,
+     "node_recall_code": 0.667,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.4,
+     "edge_precision": 0.667,
+     "missed_nodes": [
+      "IdeaGenerator",
+      "PaperWriter"
+     ],
+     "missed_edges": [
+      [
+       "IdeaGenerator",
+       "ResourceAnalyst"
+      ],
+      [
+       "Prepare",
+       "ResourceAnalyst"
+      ],
+      [
+       "ResourceAnalyst",
+       "IdeaGenerator"
+      ]
+     ],
+     "wrong": []
+    },
+    "Mobile-Agent-v2": {
+     "node_recall": 0.0,
+     "node_recall_code": 0.0,
+     "node_precision_strict": 0.0,
+     "node_precision_lenient": 0.0,
+     "edge_recall": 0.0,
+     "edge_precision": 0.0,
+     "missed_nodes": [
+      "Decision",
+      "Memory",
+      "Planning",
+      "Reflection"
+     ],
+     "missed_edges": [
+      [
+       "Decision",
+       "Memory"
+      ],
+      [
+       "Decision",
+       "Reflection"
+      ],
+      [
+       "Planning",
+       "Decision"
+      ],
+      [
+       "Reflection",
+       "Planning"
+      ]
+     ],
+     "wrong": [
+      "inference_chat"
+     ]
+    },
+    "MapCoder": {
+     "node_recall": 0.0,
+     "node_recall_code": 0.0,
+     "node_precision_strict": 0.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.0,
+     "edge_precision": 0.0,
+     "missed_nodes": [
+      "Coding",
+      "Debugging",
+      "Planning",
+      "Retrieval"
+     ],
+     "missed_edges": [
+      [
+       "Coding",
+       "Debugging"
+      ],
+      [
+       "Debugging",
+       "Planning"
+      ],
+      [
+       "Planning",
+       "Coding"
+      ],
+      [
+       "Retrieval",
+       "Planning"
+      ]
+     ],
+     "wrong": []
+    },
+    "AutoKaggle": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.6,
+     "edge_precision": 0.375,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Developer",
+       "Reviewer"
+      ],
+      [
+       "Reviewer",
+       "Summarizer"
+      ]
+     ],
+     "wrong": []
+    },
+    "octotools": {
+     "node_recall": 0.0,
+     "node_recall_code": 0.0,
+     "node_precision_strict": 0.0,
+     "node_precision_lenient": 0.667,
+     "edge_recall": 0.0,
+     "edge_precision": 0.0,
+     "missed_nodes": [
+      "ActionPredictor",
+      "CommandExecutor",
+      "CommandGenerator",
+      "ContextVerifier",
+      "QueryAnalyzer",
+      "SolutionSummarizer"
+     ],
+     "missed_edges": [
+      [
+       "ActionPredictor",
+       "CommandGenerator"
+      ],
+      [
+       "CommandExecutor",
+       "ContextVerifier"
+      ],
+      [
+       "CommandGenerator",
+       "CommandExecutor"
+      ],
+      [
+       "ContextVerifier",
+       "ActionPredictor"
+      ],
+      [
+       "ContextVerifier",
+       "SolutionSummarizer"
+      ],
+      [
+       "QueryAnalyzer",
+       "ActionPredictor"
+      ]
+     ],
+     "wrong": [
+      "anthropic",
+      "gemini",
+      "xai",
+      "result_scorer"
+     ]
+    }
+   },
+   "mean": {
+    "node_recall": 0.562,
+    "node_recall_code": 0.642,
+    "node_precision_strict": 0.527,
+    "node_precision_lenient": 0.817,
+    "edge_recall": 0.405,
+    "edge_precision": 0.504
+   }
+  },
+  "after": {
+   "projects": {
+    "ai-hedge-fund": {
+     "node_recall": 0.2,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.0,
+     "edge_precision": 0.0,
+     "missed_nodes": [
+      "Backtests",
+      "PortfolioConstruction",
+      "RiskChecks",
+      "SimulatedExecution"
+     ],
+     "missed_edges": [
+      [
+       "InvestmentAnalysis",
+       "PortfolioConstruction"
+      ],
+      [
+       "PortfolioConstruction",
+       "RiskChecks"
+      ],
+      [
+       "RiskChecks",
+       "SimulatedExecution"
+      ],
+      [
+       "SimulatedExecution",
+       "Backtests"
+      ]
+     ],
+     "wrong": []
+    },
+    "gemini-fullstack-langgraph": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 1.0,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [],
+     "wrong": []
+    },
+    "open_deep_research": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.667,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.8,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "SubAgents",
+       "Supervisor"
+      ]
+     ],
+     "wrong": []
+    },
+    "AgentVerse": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.25,
+     "node_precision_lenient": 0.972,
+     "edge_recall": 1.0,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [],
+     "wrong": []
+    },
+    "Paper2Poster": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.964,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.75,
+     "edge_precision": 0.6,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Parser",
+       "Planner"
+      ]
+     ],
+     "wrong": []
+    },
+    "AI-Researcher": {
+     "node_recall": 0.833,
+     "node_recall_code": 0.833,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.8,
+     "edge_precision": 0.667,
+     "missed_nodes": [
+      "PaperWriter"
+     ],
+     "missed_edges": [
+      [
+       "ResourceAnalyst",
+       "IdeaGenerator"
+      ]
+     ],
+     "wrong": []
+    },
+    "Mobile-Agent-v2": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.75,
+     "edge_precision": 0.75,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Decision",
+       "Reflection"
+      ]
+     ],
+     "wrong": []
+    },
+    "MapCoder": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 0.4,
+     "node_precision_lenient": 0.9,
+     "edge_recall": 0.5,
+     "edge_precision": 1.0,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Debugging",
+       "Planning"
+      ],
+      [
+       "Planning",
+       "Coding"
+      ]
+     ],
+     "wrong": []
+    },
+    "AutoKaggle": {
+     "node_recall": 1.0,
+     "node_recall_code": 1.0,
+     "node_precision_strict": 1.0,
+     "node_precision_lenient": 1.0,
+     "edge_recall": 0.8,
+     "edge_precision": 0.667,
+     "missed_nodes": [],
+     "missed_edges": [
+      [
+       "Reader",
+       "Planner"
+      ]
+     ],
+     "wrong": []
+    },
+    "octotools": {
+     "node_recall": 0.833,
+     "node_recall_code": 0.833,
+     "node_precision_strict": 0.455,
+     "node_precision_lenient": 0.818,
+     "edge_recall": 0.667,
+     "edge_precision": 0.8,
+     "missed_nodes": [
+      "CommandExecutor"
+     ],
+     "missed_edges": [
+      [
+       "CommandExecutor",
+       "ContextVerifier"
+      ],
+      [
+       "CommandGenerator",
+       "CommandExecutor"
+      ]
+     ],
+     "wrong": [
+      "result_scorer",
+      "extract_answer"
+     ]
+    }
+   },
+   "mean": {
+    "node_recall": 0.887,
+    "node_recall_code": 0.967,
+    "node_precision_strict": 0.774,
+    "node_precision_lenient": 0.969,
+    "edge_recall": 0.707,
+    "edge_precision": 0.748
+   }
+  }
+ },
+ "regression_sets1to7": {
+  "set1": {
+   "before": {
+    "node_recall": 0.975,
+    "node_recall_code": 0.975,
+    "node_precision_strict": 0.852,
+    "node_precision_lenient": 1.0,
+    "edge_recall": 0.829,
+    "edge_precision": 0.859
+   },
+   "after": {
+    "node_recall": 0.975,
+    "node_recall_code": 0.975,
+    "node_precision_strict": 0.852,
+    "node_precision_lenient": 1.0,
+    "edge_recall": 0.829,
+    "edge_precision": 0.859
+   }
+  },
+  "set2": {
+   "before": {
+    "node_recall": 0.925,
+    "node_recall_code": 0.971,
+    "node_precision_strict": 0.839,
+    "node_precision_lenient": 0.982,
+    "edge_recall": 0.839,
+    "edge_precision": 0.899
+   },
+   "after": {
+    "node_recall": 0.925,
+    "node_recall_code": 0.971,
+    "node_precision_strict": 0.839,
+    "node_precision_lenient": 0.982,
+    "edge_recall": 0.839,
+    "edge_precision": 0.899
+   }
+  },
+  "set3": {
+   "before": {
+    "node_recall": 0.975,
+    "node_recall_code": 0.975,
+    "node_precision_strict": 0.818,
+    "node_precision_lenient": 0.914,
+    "edge_recall": 0.75,
+    "edge_precision": 0.667
+   },
+   "after": {
+    "node_recall": 0.975,
+    "node_recall_code": 0.975,
+    "node_precision_strict": 0.818,
+    "node_precision_lenient": 0.914,
+    "edge_recall": 0.75,
+    "edge_precision": 0.667
+   }
+  },
+  "set4": {
+   "before": {
+    "node_recall": 0.888,
+    "node_recall_code": 0.918,
+    "node_precision_strict": 0.831,
+    "node_precision_lenient": 0.948,
+    "edge_recall": 0.501,
+    "edge_precision": 0.699
+   },
+   "after": {
+    "node_recall": 0.888,
+    "node_recall_code": 0.918,
+    "node_precision_strict": 0.831,
+    "node_precision_lenient": 0.948,
+    "edge_recall": 0.501,
+    "edge_precision": 0.699
+   }
+  },
+  "set5": {
+   "before": {
+    "node_recall": 0.825,
+    "node_recall_code": 0.825,
+    "node_precision_strict": 0.881,
+    "node_precision_lenient": 0.948,
+    "edge_recall": 0.602,
+    "edge_precision": 0.6
+   },
+   "after": {
+    "node_recall": 0.825,
+    "node_recall_code": 0.825,
+    "node_precision_strict": 0.881,
+    "node_precision_lenient": 0.948,
+    "edge_recall": 0.602,
+    "edge_precision": 0.6
+   }
+  },
+  "set6": {
+   "before": {
+    "node_recall": 0.955,
+    "node_recall_code": 0.955,
+    "node_precision_strict": 0.707,
+    "node_precision_lenient": 0.903,
+    "edge_recall": 0.626,
+    "edge_precision": 0.688
+   },
+   "after": {
+    "node_recall": 0.955,
+    "node_recall_code": 0.955,
+    "node_precision_strict": 0.707,
+    "node_precision_lenient": 0.903,
+    "edge_recall": 0.626,
+    "edge_precision": 0.688
+   }
+  },
+  "set7": {
+   "before": {
+    "node_recall": 0.867,
+    "node_recall_code": 1.0,
+    "node_precision_strict": 0.732,
+    "node_precision_lenient": 0.933,
+    "edge_recall": 0.791,
+    "edge_precision": 0.835
+   },
+   "after": {
+    "node_recall": 0.867,
+    "node_recall_code": 1.0,
+    "node_precision_strict": 0.732,
+    "node_precision_lenient": 0.933,
+    "edge_recall": 0.791,
+    "edge_precision": 0.835
+   }
+  }
+ }
+}
