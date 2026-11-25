@@ -5,9 +5,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
-
-import pytest
 
 from visualagents import blueprint as bpm
 from visualagents import cli, detect, home, hooks

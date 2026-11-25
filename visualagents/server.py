@@ -10,7 +10,6 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
-import socket
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

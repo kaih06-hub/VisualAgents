@@ -45,7 +45,7 @@ def _args(**kw):
 def test_offline_path_maps_and_starts_the_project(monkeypatch, project):
     for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "VISUALAGENTS_PROVIDER"):
         monkeypatch.delenv(k, raising=False)
-    s = Script(monkeypatch, ["Another folder", "Skip", "Start it now"], texts=[str(project)])
+    Script(monkeypatch, ["Another folder", "Skip", "Start it now"], texts=[str(project)])
     assert wizard.run(_args()) == 0
     bp = json.loads((project / ".visualagents" / "blueprint.json").read_text())
     assert [a["name"] for a in bp["agents"]] == ["Writer"]

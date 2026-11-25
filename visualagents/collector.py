@@ -416,7 +416,7 @@ def outline(files: list[SourceFile], budget_chars: int) -> str:
             body = body[:OUTLINE_LINES] + tables + [f"      … {len(body) - OUTLINE_LINES - len(tables)} more"]
         blocks.append((rank, f.rel, f.rel + ("\n" + "\n".join(body) if body else "") + "\n"))
     kept, used = [], 0
-    for rank, rel, block in sorted(blocks):  # best-ranked first, so they win when the budget is short
+    for _rank, rel, block in sorted(blocks):  # best-ranked first, so they win when the budget is short
         if used + len(block) > budget_chars:
             block = rel + "\n"  # no room for its contents: still show the file exists
             if used + len(block) > budget_chars:

@@ -2231,7 +2231,7 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
 
     # A LangGraph node usually wraps an agent object: fold the agent into the node
     if c.graph_nodes:
-        for node_name, node_agent in c.graph_nodes.items():
+        for node_agent in c.graph_nodes.values():
             fn_names = [a for a in node_agent["aliases"] if a in c.functions]
             referenced: set[str] = set()
             for fn in fn_names:
@@ -2470,11 +2470,11 @@ def _names_used(c: _Collector, nodes: list[ast.AST]) -> set[str]:
                 # a project function handed to something that will run it: wrap(plan_node, "plan"), partial(step, llm)
                 handed = [a.id for a in (*n.args, *(k.value for k in n.keywords)) if isinstance(a, ast.Name)
                           and a.id in c.own_defs] if isinstance(n, ast.Call) else []
-                for name in (name, *handed):
-                    if name and name not in names:
-                        names.add(name)
-                        if name in c.own_defs:
-                            following.append(c.own_defs[name])
+                for ref in (name, *handed):
+                    if ref and ref not in names:
+                        names.add(ref)
+                        if ref in c.own_defs:
+                            following.append(c.own_defs[ref])
         frontier = following
     return names
 

@@ -33,7 +33,7 @@ def _wait(pred, timeout=10):
 
 
 def _setup(tmp_path, command=None):
-    (tmp_path / "main.py").write_text('if __name__ == "__main__":\n' + "".join("    " + l + "\n" for l in APP.splitlines()))
+    (tmp_path / "main.py").write_text('if __name__ == "__main__":\n' + "".join("    " + line + "\n" for line in APP.splitlines()))
     if command:
         detect.save_choice(tmp_path, detect.Candidate(command, "."))
     hub = Hub(BP, meta={"mode": "blueprint", "project": str(tmp_path)})

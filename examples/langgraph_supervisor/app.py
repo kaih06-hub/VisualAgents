@@ -82,7 +82,7 @@ def route(state: State) -> Literal["researcher", "coder", "reviewer", "finish"]:
 
 
 def researcher(state: State) -> dict:
-    thought = researcher_llm.invoke(state["task"])
+    researcher_llm.invoke(state["task"])  # its reply is what the live map shows as its thought
     time.sleep(0.6)
     found = search_docs.invoke({"query": "rate limiting"})
     return {"notes": state.get("notes", []) + [f"research: {found}"]}

@@ -715,7 +715,7 @@ def _merge_step_variants(agents: dict[str, dict[str, Any]], meta: dict[str, dict
                 if pre[a] != pre[b]:
                     pairs.setdefault((rel, a, b), []).append((step, pre[a]))
     merged: dict[str, str] = {}
-    for (rel, a, b), steps in pairs.items():
+    for (rel, _a, b), steps in pairs.items():
         if len(steps) < 2:
             continue
         both = [(agents[keep_id]["name"], agents[by_step[(rel, step)][b]]["name"]) for step, keep_id in steps

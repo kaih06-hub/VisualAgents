@@ -33,7 +33,7 @@ dependencies = ["anthropic>=1.15"]
 openai = ["openai>=1.40"]
 google = ["google-genai>=2.0"]
 all = ["openai>=1.40", "google-genai>=2.0"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.8"]
 
 [project.scripts]
 visualagents = "visualagents.cli:main"
@@ -53,3 +53,17 @@ include = ["visualagents", "examples", "tests", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+# benchmarks/ holds answer keys frozen by checksum; _handoff/ is a local notes folder, never committed
+extend-exclude = ["benchmarks", "_handoff"]
+
+[tool.ruff.lint]
+# syntax errors, undefined and unused names (ruff's classic default set, listed so newer ruff versions with wider
+# defaults check the same), plus import order and likely bugs
+select = ["E4", "E7", "E9", "F", "I", "B"]
+# zip() without strict= (B905): several zips pair sequences that may differ in length on purpose, and
+# strict=True would turn that into a crash
+ignore = ["B905"]

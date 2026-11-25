@@ -2,7 +2,6 @@ import json
 import sys
 import threading
 import urllib.request
-from pathlib import Path
 
 from visualagents import blueprint as bpm
 from visualagents.hub import Hub

@@ -203,7 +203,7 @@ def _ensure_key(provider: str) -> bool:
     elif provider == "anthropic" and llm.has_credentials("anthropic"):
         if _check_key(provider):
             return True
-    for attempt in range(3):
+    for _ in range(3):
         tui.note(termui.dim(f"Paste it below - it stays hidden · {KEY_HELP[provider]} · empty = skip"))
         key = tui.secret("API key")
         if not key:
@@ -255,8 +255,8 @@ def _local_server(saved: dict[str, Any]) -> tuple[str | None, str | None]:
     with tui.Spinner("Asking the server which models it has"):
         try:
             models = llm.list_models("openai")
-        except llm.LLMError as exc:
-            models, problem = [], str(exc)
+        except llm.LLMError:
+            models = []
     if not models:
         tui.warn(f"Couldn't reach {base} - is the server running? Continuing offline.")
         return None, None
@@ -298,7 +298,7 @@ def map_agents(project: Path, provider: str | None, model: str | None) -> dict[s
 
 
 def show_and_watch(project: Path, bp: dict[str, Any], args: argparse.Namespace) -> int:
-    from .cli import _hold, _choose_start_command
+    from .cli import _choose_start_command, _hold
     from .runner import follow_new_logs, install_sigterm_handler, run_command
 
     record = bpmod.state_dir(project) / "runs"

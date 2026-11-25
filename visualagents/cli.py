@@ -13,9 +13,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, termui
 from . import blueprint as bpmod
-from . import termui
 from .hub import Hub
 from .llm import PROVIDERS, LLMError, detect_provider, load_dotenv_keys
 from .server import Server, exposure_warning
@@ -314,9 +313,8 @@ def cmd_show(args, _command) -> int:
 
 
 def cmd_run(args, command: list[str]) -> int:
-    from .runner import install_sigterm_handler, run_command
-
     from . import detect
+    from .runner import install_sigterm_handler, run_command
 
     project = (args.project or Path.cwd()).resolve()
     if not project.is_dir():
@@ -360,9 +358,8 @@ def cmd_run(args, command: list[str]) -> int:
         if provider is None:
             termui.info("--smart needs ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY - continuing without narration.")
         else:
-            from .narrator import Narrator
-
             from .llm import default_model
+            from .narrator import Narrator
 
             model = args.narrate_model or default_model(provider, "narrate")
             termui.info(f"Smart narration: {provider}:{model} every {args.interval:g}s while output changes.")
@@ -545,7 +542,7 @@ def cmd_up(args, _command) -> int:
         from .runner import install_sigterm_handler
 
         projects = Projects(daemon=True)
-        for pid, meta in home.registry().items():
+        for meta in home.registry().values():
             if Path(meta.get("path", "")).is_dir():
                 try:
                     projects.open(Path(meta["path"]))

@@ -487,7 +487,8 @@ def _hook_langchain(_module=None):
         return
     from contextvars import ContextVar
 
-    ctx.register_configure_hook(ContextVar("visualagents_handler", default=langchain_handler()), True)
+    # one handler shared by every context on purpose: how register_configure_hook is meant to be used
+    ctx.register_configure_hook(ContextVar("visualagents_handler", default=langchain_handler()), True)  # noqa: B039
     ctx._visualagents_hooked = True
 
 
