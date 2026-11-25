@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import posixpath
 import re
@@ -19,6 +20,8 @@ from typing import Any
 from . import blueprint as bpmod
 from . import call_sites, run_order
 from .collector import SKIP_DIRS, SourceFile, collect, is_test_file, parse_python
+
+_log = logging.getLogger(__name__)
 
 AGENT_CLASSES = {
     "Agent", "AssistantAgent", "UserProxyAgent", "ConversableAgent", "CodeExecutorAgent",
@@ -1342,8 +1345,10 @@ def _parse_simple_yaml(text: str) -> dict[str, dict[str, str]]:
         data = yaml.safe_load(text)
         if isinstance(data, dict):
             return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in data.items() if isinstance(v, dict)}
-    except Exception:
+    except ImportError:  # no PyYAML: the simple reader below
         pass
+    except Exception:  # not valid YAML, or not the shape expected: the simple reader below
+        _log.debug("PyYAML could not read a YAML file; using the simple reader", exc_info=True)
     out: dict[str, dict[str, str]] = {}
     cur: dict[str, str] | None = None
     key: str | None = None

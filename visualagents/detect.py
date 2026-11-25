@@ -9,6 +9,7 @@ points `python` / `uvicorn` / ... at the project's own virtualenv. The chosen co
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from . import blueprint as bpmod
+
+_log = logging.getLogger(__name__)
 
 _SKIP = {".git", "node_modules", "__pycache__", ".visualagents", "dist", "build", ".tox", ".mypy_cache",
          ".pytest_cache", "site-packages", ".next", ".cache"}
@@ -282,7 +285,8 @@ def _project_scripts(project: Path) -> list[str]:
         return _scripts_tables(text)
     try:
         data = tomllib.loads(text)
-    except Exception:
+    except Exception:  # not valid TOML: no scripts to offer
+        _log.debug("could not parse pyproject.toml", exc_info=True)
         return []
     scripts = dict((data.get("project") or {}).get("scripts") or {})
     scripts.update(((data.get("tool") or {}).get("poetry") or {}).get("scripts") or {})

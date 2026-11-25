@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 def home() -> Path:
@@ -68,7 +71,8 @@ def _daemon_pid(info: dict[str, Any]) -> int | None:
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as res:
             pid = json.loads(res.read(4096)).get("pid")
-    except Exception:
+    except Exception:  # not running, another program on the port, or an unreadable answer: all mean "not ours"
+        _log.debug("no answer from a dashboard at %s", url, exc_info=True)
         return None
     return pid if isinstance(pid, int) else None
 

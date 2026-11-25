@@ -417,6 +417,7 @@ and output, with no password: use it only on a network you trust (see [SECURITY.
 | The LLM scan failed | VisualAgents falls back to the offline map. Retry, or pick another model (`visualagents models --provider …`); a free Gemini key may have used up its requests for the day. |
 | An agent is missing or misnamed | `visualagents scan <folder> --llm` for a richer map, or edit `.visualagents/blueprint.json` (and don't run `scan` again afterwards: it replaces the file). Agents seen only at runtime still appear (dashed). |
 | Wrong start command | `visualagents run <folder> --pick`. |
+| Something quietly doesn't work | Run the command with `VISUALAGENTS_DEBUG=1` in front: it prints the problems VisualAgents otherwise works around without a word. |
 
 ## Development
 

@@ -277,3 +277,29 @@ def test_bind_gives_up_at_once_on_an_error_other_than_port_in_use(monkeypatch):
         server._bind("10.255.255.1", 7420, object)
     assert exc.value.errno == errno.EADDRNOTAVAIL
     assert tried == [7420, 7421]  # in use: the next port; anything else: no 18 more tries
+
+
+# -- problems worked around quietly can be shown --------------------------------------------------------------
+
+def test_visualagents_debug_turns_on_logging(monkeypatch, tmp_path):
+    import logging
+
+    calls = []
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: calls.append(kw))
+    monkeypatch.delenv("VISUALAGENTS_DEBUG", raising=False)
+    assert cli.main(["scan", str(tmp_path), "--static"]) == 0
+    assert calls == []  # off unless asked for
+    monkeypatch.setenv("VISUALAGENTS_DEBUG", "1")
+    assert cli.main(["scan", str(tmp_path), "--static"]) == 0
+    assert calls and calls[0]["level"] == logging.DEBUG
+
+
+def test_an_unreadable_pyproject_still_falls_back_but_says_why(tmp_path, caplog):
+    import logging
+
+    from visualagents import detect
+
+    (tmp_path / "pyproject.toml").write_text("[project\nname = ")
+    with caplog.at_level(logging.DEBUG, logger="visualagents.detect"):
+        assert detect._project_scripts(tmp_path) == []
+    assert any("pyproject.toml" in r.getMessage() and r.exc_info for r in caplog.records)

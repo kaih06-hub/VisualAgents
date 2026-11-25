@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sys
@@ -18,6 +19,8 @@ from . import blueprint as bpmod
 from .hub import Hub
 from .llm import PROVIDERS, LLMError, detect_provider, load_dotenv_keys
 from .server import Server, exposure_warning
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 7420
 DAEMON_PORT = 7400
@@ -198,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     if not ours and sys.stdin.isatty() and sys.stderr.isatty():
         ours = ["setup"]  # bare `visualagents` in a terminal: the guided start
     args = parser.parse_args(ours)
+    if os.environ.get("VISUALAGENTS_DEBUG"):  # show the problems VisualAgents works around quietly
+        logging.basicConfig(level=logging.DEBUG, format="visualagents %(name)s: %(message)s")
     if not args.cmd:
         parser.print_help()
         return 0
@@ -671,8 +676,8 @@ def _notify_daemon(info: dict, project: Path) -> None:
                                  headers={"Content-Type": "application/json", "X-VisualAgents-Token": info["token"]})
     try:
         urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5).read()
-    except Exception:
-        pass
+    except Exception:  # the dashboard learns of the project anyway, at its first event
+        _log.debug("could not tell the dashboard about %s", project, exc_info=True)
 
 
 def cmd_unhook(args, _command) -> int:
@@ -685,8 +690,8 @@ def cmd_unhook(args, _command) -> int:
     for v in detect.find_venvs(project):
         try:
             sites.add(str(hooks.site_packages(detect.venv_bin(v, "python"))))
-        except Exception:
-            pass
+        except Exception:  # a broken virtualenv: the others are still unhooked
+            _log.debug("could not find site-packages of %s", v, exc_info=True)
     removed = [s for s in sites if hooks.uninstall(Path(s))]
     projects.pop(pid, None)
     home.save_registry(projects)
