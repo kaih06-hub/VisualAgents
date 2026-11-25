@@ -260,11 +260,11 @@ flowchart LR
 
 The map is a first draft, not a guarantee. It is checked against agent projects whose READMEs draw their own agent
 graph ([benchmarks/readme_graphs](https://github.com/kaih06-hub/VisualAgents/tree/main/benchmarks/readme_graphs)).
-On nine projects the scanner had never seen (set 12), the offline scan found about **3 in 4** of the agents those
-diagrams draw and about **4 in 10** of the arrows between them, against about nine in ten agents on the projects
-it was tuned on. Projects that declare their graph in code (LangGraph `add_node` / `add_edge`) come out best;
-roles kept in a settings table and run by one generic runner, agents started in parallel, and agents deployed as
-separate apps come out worst. The optional LLM pass has not been measured on unseen projects yet. Agents the scan
+On two sets of nine projects the scanner had never seen (sets 12 and 13), the offline scan found about **7 in 10** of
+the agents those diagrams draw (0.73 and 0.69) and about **4 in 10** of the arrows between them (0.42 and 0.40),
+against about nine in ten agents on the projects it was tuned on. Projects that declare their graph in code (LangGraph `add_node` / `add_edge`) come out best;
+roles kept in a settings table and run by one generic runner, agents started in parallel, agents deployed as
+separate apps, Google ADK workflows and agents built by factory functions come out worst. The optional LLM pass has not been measured on unseen projects yet. Agents the scan
 misses still appear on the live map, dashed, once they run, and you can edit `.visualagents/blueprint.json`.
 
 ## Supported frameworks
