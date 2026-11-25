@@ -292,9 +292,10 @@ def list_models(provider: str) -> list[str]:
 # -- prompts ----------------------------------------------------------------
 
 SCAN_SYSTEM = """You are the code analyst inside VisualAgents, a tool that draws a live map of multi-agent AI \
-applications. You read a project's source and return its blueprint: which agents exist, what each one does, \
-and how work flows between them. The blueprint is rendered as a node graph, and later used to recognise each \
-agent in the program's printed chain-of-thought logs.
+applications: which agents exist, what each one does, and how work flows between them. Static analysis has already \
+drawn a map of the project from facts in its code. You check that map against the source and return your changes \
+to it - not a new map: everything you do not change stays as it is. The map is rendered as a node graph, and later \
+used to recognise each agent in the program's printed chain-of-thought logs.
 
 What an agent is:
 - An agent is a distinct LLM-driven worker (own prompt / role / tools) or a graph node that performs a \
@@ -349,9 +350,35 @@ in folders of their own. An example script that is the project's own way to run 
 - When the README is shown, it says which parts make up the project and which are examples or alternatives; \
 trust it over folder names.
 
+How to check the map:
+- Blocks marked fixed are nodes of a graph the code wires up itself (add_node, addNode), and arrows marked fixed are \
+that wiring. They stay, even a node that makes no model call: it is a step of the workflow the graph runs. Remove \
+a fixed block only when the whole graph is something to leave off the map (an alternative copy, an example, a test).
+- add: agents the map misses. Common gaps: roles listed in a settings table or config file that one generic runner \
+runs (each role is an agent, located where its entry is written); agents in a part of the project the map has no \
+blocks for; agents written in another language or declared in a config file.
+- add_edges: handoffs the map misses. Common gaps: a runner that starts agents in parallel (asyncio.gather, a \
+thread pool, a batch of runs) and passes their results on (an arrow from each of them to the agent that gets the \
+results); an orchestrator that calls agents in turn (an arrow from it to each); agents deployed as separate apps \
+or services that call each other over the network (an arrow from caller to callee).
+- Every add and add_edges entry needs evidence: file, line and a short exact quote of the code on that line (one \
+line, copied as shown, without its line number). Entries whose quote is not in that file are discarded, so never \
+add an agent or a handoff you cannot point to in the code.
+- remove: blocks that do not belong on this map, each with a reason - plumbing (a client, wrapper or helper that \
+only forwards prompts it is given; a service no agent's code runs), alternative (another copy, port, legacy \
+version or variant of agents already drawn), not_part_of_run (examples, tests, demos, benchmarks, opt-in parts), \
+or duplicate (one agent drawn twice, such as a graph node and the agent class it runs: set merge_into to the block \
+that stays).
+- remove_edges: arrows the code does not have.
+- update: for each block that stays, its display name, role, description, tools, aliases and keywords. Ids never \
+change, and every other field refers to blocks by id.
+- read: when code you need is not shown in full - it appears only in the outline, or in an excerpt - ask for it by \
+path and line range (at most 8 ranges, up to 400 lines each), and give your best changes so far as well. You get \
+one chance to read more.
+
 Fields:
-- ids are stable snake_case names taken from the code: LangGraph node names, CrewAI agents.yaml keys, \
-Agent(name=...) values, AutoGen agent names.
+- ids of added agents are stable snake_case names taken from the code: LangGraph node names, CrewAI agents.yaml \
+keys, Agent(name=...) values, AutoGen agent names.
 - aliases: every string that may identify the agent in logs - node name, variable names, class name, the \
 name= value, CrewAI role text with template variables removed. Always include the name of the class (or \
 function) that builds this agent's prompt and calls the model, e.g. a Programmer class holding its own OpenAI \
@@ -361,26 +388,28 @@ client - never a class or helper shared by several agents, such as a common LLMS
 LLM decision picks the next agent. Include loops such as critic -> writer.
 - entry: the agents that receive the user's query first. exits: the agents that produce the final answer.
 - steps: the general blueprint a typical query moves through, as 2-8 ordered phases, each naming its agents.
-- file and line: where the agent is defined (use the line numbers shown in the source). line=0 if unsure.
 - framework: what the mapped agents are built with, from the imports of the files that define them \
 (langgraph, crewai, autogen, camel, dspy, ...). A library used only for model calls (LangChain chat models, \
 LiteLLM) is not the framework when another one runs the agents; custom when none does.
 
 Reading the input:
+- <current_map> is the static map: blocks with their id, name, file, line and whether they are fixed, and arrows. \
+It is read from code facts - framework constructors, class bases, model calls, call order - and is right more \
+often than not, but it can hold plumbing, alternatives and duplicates, miss agents and handoffs, and guess the \
+framework wrong.
+- <static_analysis_facts>, when present, are structural facts to weigh: ports (the same agent names defined on \
+two frameworks, each in its own folder), config_lists (default lists of roles or agents in configuration that \
+name parts of the project), factories (code that creates one of several agents depending on a setting - the \
+setting picks which one runs, so they are alternatives), script_pipelines (shell scripts that run the project's \
+scripts in order: the order is how work flows between them, and two scripts running parallel copies of the steps \
+are alternatives) and agent_classes_never_used (agent classes nothing in the project creates or names - most \
+likely not part of a run).
 - The source starts with <repo_outline>: every source file with its classes (and their base classes), \
 functions and prompt personas, each with its line number - including files not shown in full. The files after it \
 are the most relevant ones; those marked excerpt show only selected lines. An agent you can only see in the \
 outline (another subclass of the same agent base class, another module of the same pipeline) is still an agent: \
-include it, with the outline's file and line.
-- <static_analysis_hints> are read from code facts - framework constructors, class bases, imports - and are \
-heuristic: reuse their names, aliases and line numbers, but drop hint agents the source shows are plumbing or \
-belong to something you leave off the map, and add agents the hints missed. Their framework is a guess. Their \
-facts, when present, are structural facts to weigh: ports (the same agent names defined on two frameworks, \
-each in its own folder), config_lists (default lists of roles or agents in configuration that name parts of the \
-project), factories (code that creates one of several agents depending on a setting - the setting picks which \
-one runs, so they are alternatives), script_pipelines (shell scripts that run the project's scripts in order: the \
-order is how work flows between them, and two scripts running parallel copies of the steps are alternatives) and \
-agent_classes_never_used (agent classes nothing in the project creates or names - most likely not part of a run)."""
+read its code, or add it with a quote of its definition line as the outline shows it. <requested_code> holds the \
+line ranges you asked to read."""
 
 NARRATE_SYSTEM = """You watch the live console output of a multi-agent AI program for VisualAgents. Given the \
 program's agents and its most recent log lines, decide which agent is working right now and describe what it \

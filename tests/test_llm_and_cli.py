@@ -43,23 +43,26 @@ def _fake_anthropic(monkeypatch, payload, captured, stop_reason="end_turn"):
     monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
 
 
-def test_scan_uses_structured_output_and_merges_static_aliases(monkeypatch, tmp_path):
-    payload = {
-        "project": "demo", "framework": "custom", "summary": "Four agents.",
-        "agents": [
-            {"id": "planner", "name": "Planner", "role": "plans", "description": "d", "tools": ["outline_builder"],
-             "file": "research_crew.py", "line": 37, "aliases": [], "keywords": ["plan"]},
-            {"id": "writer", "name": "Writer", "role": "writes", "description": "d", "tools": [], "file": "", "line": 0,
-             "aliases": [], "keywords": []},
-        ],
-        "edges": [{"from": "planner", "to": "writer", "label": "plan", "conditional": False}],
-        "entry": ["planner"], "exits": ["writer"],
-        "steps": [{"order": 1, "title": "Plan", "agents": ["planner"], "description": ""}],
-    }
+def _changes(**kw):
+    """A review answer: no changes unless given."""
+    out = {"read": [], "update": [], "remove": [], "add": [], "add_edges": [], "remove_edges": [], "framework": "",
+           "summary": "", "entry": [], "exits": [], "steps": []}
+    out.update(kw)
+    return out
+
+
+def test_scan_sends_the_static_map_and_applies_the_models_changes(monkeypatch, tmp_path):
+    demo = ROOT / "visualagents" / "demo"
+    static = scanner.scan_project(demo, mode="static", log=lambda m: None)
+    payload = _changes(
+        summary="Four agents.",
+        update=[{"id": "planner", "name": "Lead Planner", "role": "plans", "description": "d",
+                 "tools": ["outline_builder"], "aliases": [], "keywords": ["plan"]}],
+    )
     captured = {}
     _fake_anthropic(monkeypatch, payload, captured)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    bp = scanner.scan_project(ROOT / "visualagents" / "demo", mode="llm", log=lambda m: None)
+    bp = scanner.scan_project(demo, mode="llm", log=lambda m: None)
 
     assert captured["model"] == "claude-opus-5-5"
     assert captured["_beta"] is True
@@ -67,11 +70,16 @@ def test_scan_uses_structured_output_and_merges_static_aliases(monkeypatch, tmp_
     assert captured["betas"] == ["server-side-fallback-2026-07-01"]
     assert captured["output_config"]["format"]["type"] == "json_schema"
     assert captured["output_config"]["effort"] == "high"
-    assert "<static_analysis_hints>" in captured["messages"][0]["content"]
+    assert "<current_map>" in captured["messages"][0]["content"]
     assert "<repo_outline>" in captured["messages"][0]["content"]  # every file's shape, not just the ones in full
     assert bp["generated_by"] == "anthropic:claude-opus-5-5"
-    assert [a["id"] for a in bp["agents"]] == ["planner", "writer"]
-    assert "Writer" in bp["agents"][1]["aliases"] or bp["agents"][1]["name"] == "Writer"
+    # the static map is the base: nothing the model left alone is lost, and its names stay as aliases
+    assert [a["id"] for a in bp["agents"]] == [a["id"] for a in static["agents"]]
+    planner = bp["agents"][0]
+    assert planner["name"] == "Lead Planner" and "Planner" in planner["aliases"]
+    assert planner["keywords"][0] == "plan" and len(planner["keywords"]) > 1  # the static keywords stay too
+    assert [(e["from"], e["to"]) for e in bp["edges"]] == [(e["from"], e["to"]) for e in static["edges"]]
+    assert bp["summary"] == "Four agents."
 
 
 def _agent(name, file="", line=0):
@@ -79,12 +87,13 @@ def _agent(name, file="", line=0):
             "line": line, "aliases": [], "keywords": []}
 
 
-def test_structural_facts_reach_the_llm_and_its_map_is_kept_as_drawn(monkeypatch, tmp_path):
+def test_structural_facts_reach_the_llm_and_graph_nodes_stay(monkeypatch, tmp_path):
     (tmp_path / "team").mkdir()
     (tmp_path / "team" / "graph.py").write_text(
         "from langgraph.graph import StateGraph\n"
         "g = StateGraph(dict)\n"
         + "".join(f"g.add_node('{n}', {n})\n" for n in ("planner", "researcher", "writer", "reviewer"))
+        + "g.add_edge('planner', 'researcher')\n"
     )
     (tmp_path / "team" / "autogen_version").mkdir()
     (tmp_path / "team" / "autogen_version" / "chat.py").write_text(
@@ -92,23 +101,29 @@ def test_structural_facts_reach_the_llm_and_its_map_is_kept_as_drawn(monkeypatch
         + "".join(f"{n.lower()} = ConversableAgent(name='{n}', system_message='x')\n"
                   for n in ("Coordinator", "Researcher", "Writer", "Reviewer"))
     )
-    payload = {
-        "project": "team", "framework": "langgraph", "summary": "A research team; an AutoGen version is not drawn.",
-        "agents": [_agent("Planner", "team/graph.py", 3), _agent("Researcher", "team/graph.py", 4),
-                   _agent("Coordinator", "team/autogen_version/chat.py", 2)],
-        "edges": [{"from": "planner", "to": "researcher", "label": "", "conditional": False}],
-        "entry": ["planner"], "exits": ["researcher"], "steps": [],
-    }
+    static = scanner.scan_project(tmp_path, mode="static", log=lambda m: None)
+    port = [a["id"] for a in static["agents"] if a["file"].startswith("team/autogen_version")]
+    assert port  # the AutoGen copy is on the static map: the model has to take it off
+    payload = _changes(
+        summary="A research team; an AutoGen version is not drawn.",
+        remove=[*({"id": p, "reason": "alternative", "merge_into": "", "why": "port"} for p in port),
+                {"id": "writer", "reason": "plumbing", "merge_into": "", "why": "makes no model call"}],
+        remove_edges=[{"from": "planner", "to": "researcher", "why": "?"}],
+    )
     captured = {}
     _fake_anthropic(monkeypatch, payload, captured)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     bp = scanner.scan_project(tmp_path, mode="llm", log=lambda m: None)
 
-    hints = captured["messages"][0]["content"].split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0]
-    folders = {i["framework"]: i["folder"] for i in json.loads(hints)["facts"]["ports"][0]["implementations"]}
+    prompt = captured["messages"][0]["content"]
+    facts = json.loads(prompt.split("<static_analysis_facts>")[1].split("</static_analysis_facts>")[0])
+    folders = {i["framework"]: i["folder"] for i in facts["ports"][0]["implementations"]}
     assert folders == {"langgraph": "team", "autogen": "team/autogen_version"}
-    # the model weighs the facts; nothing it drew is deleted behind its back
-    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "coordinator"]
+    current = json.loads(prompt.split("<current_map>")[1].split("</current_map>")[0])
+    assert {a["id"] for a in current["agents"] if a["fixed"]} == {"planner", "researcher", "writer", "reviewer"}
+    # the port goes, as the model said; the graph's own nodes and wiring stay whatever it said
+    assert [a["id"] for a in bp["agents"]] == ["planner", "researcher", "writer", "reviewer"]
+    assert ("planner", "researcher") in {(e["from"], e["to"]) for e in bp["edges"]}
 
 
 def test_the_scan_prompt_teaches_structures_not_particular_projects():
@@ -144,16 +159,14 @@ def test_every_independent_system_reaches_the_llm(monkeypatch, tmp_path):
         (tmp_path / "chat" / f"agent_{i}.py").write_text(
             "from interface import Agent\n" f"class Expert{i}(Agent):\n" "    def act(self):\n"
             + "        self.turn += 1\n" * 40)
-    payload = {"project": "storm", "framework": "dspy", "summary": "s", "agents": [_agent("WikiWriter")],
-               "edges": [], "entry": [], "exits": [], "steps": []}
     captured = {}
-    _fake_anthropic(monkeypatch, payload, captured)
+    _fake_anthropic(monkeypatch, _changes(), captured)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     scanner.scan_project(tmp_path, mode="llm", max_chars=20_000, log=lambda m: None)
 
     prompt = captured["messages"][0]["content"]
-    hints = json.loads(prompt.split("<static_analysis_hints>")[1].split("</static_analysis_hints>")[0])
-    assert {"WikiWriter", "TopicExpert", "Expert0", "Expert5"} <= {a["name"] for a in hints["agents"]}
+    current = json.loads(prompt.split("<current_map>")[1].split("</current_map>")[0])
+    assert {"WikiWriter", "TopicExpert", "Expert0", "Expert5"} <= {a["name"] for a in current["agents"]}
     assert '<file path="wiki/curation.py">' in prompt
     assert "several independent systems" in captured["system"].lower()
 

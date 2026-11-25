@@ -2352,7 +2352,13 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     }
     for a in raw["agents"]:
         a["keywords"] = _keywords_for(a)
-    return bpmod.stamp(bpmod.normalize(raw), "static")
+    bp = bpmod.stamp(bpmod.normalize(raw), "static")
+    if facts is not None:  # the blocks that are nodes of a graph the code wires up (add_node / addNode)
+        graph = {id(a) for a in c.graph_nodes.values()}
+        nodes = [out["id"] for a, out in zip(raw["agents"], bp["agents"]) if id(a) in graph]
+        if nodes:
+            facts["graph_nodes"] = nodes
+    return bp
 
 
 # evaluation and benchmark harnesses measure the system; they are not part of it

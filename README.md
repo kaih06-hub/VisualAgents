@@ -46,10 +46,10 @@ terminal, on your own machine, with no changes to your code.
 
 ## Highlights
 
-- **Maps anything that calls an LLM.** Static analysis understands LangGraph, CrewAI, AutoGen, the OpenAI Agents SDK,
-  Swarm, Google ADK, smolagents and LlamaIndex - and with no framework at all, every place that prompts a model is an
-  agent, even if there is only one. An optional LLM pass (Claude, GPT, Gemini or a local model) adds roles, tools,
-  handoffs and the step-by-step workflow.
+- **Maps agent projects from their code.** Static analysis understands LangGraph, CrewAI, AutoGen, the OpenAI Agents
+  SDK, Swarm, Google ADK, smolagents, LlamaIndex, DSPy and CAMEL - and with no framework at all, every place that
+  prompts a model is an agent, even if there is only one. An optional LLM pass (Claude, GPT, Gemini or a local model)
+  checks that map against the code and adds roles, tools, missed agents and handoffs, and the step-by-step workflow.
 - **Live map.** The working agent glows with a thought bubble, handoffs animate along the arrows (with ×N counts
   for loops), workflow steps tick off, and the chain of thought streams beside it — colour-coded per agent.
 - **Rewind and replay.** A time ruler shows every agent's turn. Drag back to any second and the whole dashboard
@@ -62,7 +62,7 @@ terminal, on your own machine, with no changes to your code.
   LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq or Hugging Face; anything else is attributed from
   the console output, with optional LLM narration.
 - **Interactive.** Drag blocks around (arrows follow), hover a line of thought to make its agent bounce, click an
-  agent for its own history, switch light/dark, share a link to an exact moment.
+  agent for its own history, switch light/dark, open a link at an exact moment of a run (`?t=42`).
 - **Private by default.** Everything runs on `127.0.0.1`. Your code only goes to an LLM if you pick one, with
   secrets redacted first.
 
@@ -78,7 +78,9 @@ pipx install "visualagents[all]"
 
 or `uv tool install "visualagents[all]"`, or `pip install "visualagents[all]"` into any environment.
 Claude support is built in; `[all]` adds Gemini and OpenAI / OpenAI-compatible servers (Ollama, LM Studio, vLLM).
-Latest from GitHub: `pipx install "visualagents[all] @ git+https://github.com/kaih06-hub/VisualAgents.git"`.
+Latest from GitHub, with the changes the [changelog](https://github.com/kaih06-hub/VisualAgents/blob/main/CHANGELOG.md)
+lists as unreleased:
+`pipx install "visualagents[all] @ git+https://github.com/kaih06-hub/VisualAgents.git"`.
 
 ### 2. See it work (no API key)
 
@@ -113,6 +115,7 @@ Three questions, then your agents' map pops up:
   Paste it below - it stays hidden · get one at https://aistudio.google.com/apikey · empty = skip
   API key:
   ✔ Key works · 34 models available
+  Save it for next time? (~/.visualagents/keys.json, readable only by you) (Y/n)
   ✔ Saved to ~/.visualagents/keys.json
 
   ✔ Found 4 agent(s): Supervisor, Researcher, Coder, Reviewer  (langgraph)
@@ -173,8 +176,9 @@ have: `python main.py 2>&1 | visualagents pipe .`, or `visualagents watch . --lo
 
 - **Graph** — agents laid out in workflow order (left→right, or top→bottom on narrow screens). The working agent
   glows with a bubble showing what it's thinking; finished agents get a ✓; arrows show who hands work to whom,
-  with traversal counts. Two-way handoffs are drawn as parallel arrows; handoffs that weren't in the blueprint
-  appear dotted, and agents it missed appear dashed.
+  with traversal counts. Handoffs a router or supervisor picks between are dashed, two-way handoffs are drawn as
+  parallel arrows, handoffs that weren't in the blueprint appear dotted, and agents it missed appear with a dashed
+  border ("discovered at runtime").
 - **Steps** — the blueprint's phases across the top, checked off as the run moves through them.
 - **Working now** — the active agent, its current activity, time in this turn, tool calls and handoffs.
 - **Live chain of thought** — every thought, tool call, result and answer, colour-coded per agent; filter by agent
@@ -218,6 +222,7 @@ Light, dark or follow the system (button in the top right). On narrow screens th
 | `Space` | play / pause the replay | | `?popup=0` / `1` | hide / show the blueprint popup |
 | `L` | back to live | | `?live=0` | a still snapshot (no streaming) |
 | `←` `→` | step 1 s on the ruler (Shift: 10 s) | | `?project=<id>` | pick a project on the background dashboard |
+| `Home` `End` | start of the run / back to live (on the ruler) | | | |
 | `Esc` | close popups | | | |
 
 ## How it works
@@ -233,9 +238,13 @@ flowchart LR
 ```
 
 1. **Blueprint.** `visualagents scan` (run for you on first use) reads the most agent-relevant files. Static
-   analysis finds agents, tools and handoffs for the frameworks below; the optional LLM pass returns each agent's
-   role, description, tools, source location, log aliases and keywords, the handoff graph, entry/exit agents and
-   the general workflow, as schema-checked JSON. You can commit or hand-edit the result.
+   analysis finds agents, tools and handoffs for the frameworks below; the optional LLM pass checks that map
+   against the code and returns changes as schema-checked JSON: each agent's role, description, tools, log aliases
+   and keywords, what to take off (plumbing, alternative copies, examples), the agents and handoffs static analysis
+   missed - each quoting the line of code it comes from, or it is left out - entry/exit agents and the general
+   workflow. A graph's own nodes and wiring always stay. You can commit or hand-edit the result: `run`, `show`,
+   `pipe`, `watch` and `hook` keep the saved map unless you pass `--rescan`, while `visualagents scan` and the
+   guided start draw it again from the code, replacing your edits.
 2. **Attribution.** While the agent runs, three sources say which agent is doing what, from most to least precise:
 
    | Source | When | What you get |
@@ -258,7 +267,8 @@ flowchart LR
 | **OpenAI Agents SDK** | `Agent(handoffs=…)`, `as_tool` | tracing: agent spans, handoffs, tools |
 | **No framework** - OpenAI, Anthropic, Gemini, LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq, Hugging Face, LangChain chat models | every function or class that calls a model is an agent (a shared `generate_reply()`-style helper is not: its callers are); one call site = a one-agent system | each call credited to the code that made it, with its prompt, reply, reasoning, tool calls and results |
 | **Swarm**, **Google ADK**, **smolagents**, **LlamaIndex** | `transfer_to_*`, `sub_agents`, `managed_agents`, `AgentWorkflow` | console patterns, `--smart` |
-| **LangGraph.js**, JS/TS agents | `addNode` / `addEdge`, `new Agent({ name })` | console patterns |
+| **DSPy**, **CAMEL** | `dspy.Module` programs and their `Predict` / `ChainOfThought` steps, `ChatAgent` | each model call credited to the code that made it, console patterns |
+| **LangGraph.js**, JS/TS agents | `addNode` / `addEdge` / `addConditionalEdges`, `new Agent({ name })` | console patterns |
 | **Anything else** | the LLM pass | console patterns, `--smart`, or the SDK below |
 
 ## Choosing the LLM that draws the map
@@ -277,6 +287,8 @@ visualagents scan . --static                          # offline only
 ```
 
 A free Gemini key has no quota for the Pro models: pick `gemini-flash-latest` there, or enable billing on the key.
+Free keys also allow only a small number of requests a day per model, and busy models sometimes refuse; when a
+request fails, the scan says so and shows the offline map instead.
 
 Keys and choices are read from, in order: your shell environment, the project's `.env`, then what the guided
 start saved. You can also set `VISUALAGENTS_PROVIDER`, `VISUALAGENTS_MODEL` and `VISUALAGENTS_NARRATE_MODEL`.
@@ -345,9 +357,10 @@ visualagents hook            [FOLDER] [--python PY]…
 visualagents unhook | open   [FOLDER]
 visualagents up              [--port 7400] [--foreground]
 visualagents down | status
-visualagents scan            [FOLDER] [--static | --llm] [--provider auto|anthropic|openai|google] [--model M] [--json] [-o FILE]
+visualagents scan            [FOLDER] [--static | --llm] [--provider auto|anthropic|openai|google] [--model M] [--max-chars N] [--json] [-o FILE]
 visualagents models          [FOLDER] [--provider anthropic|openai|google]
-visualagents show | blueprint [FOLDER]
+visualagents show            [FOLDER]
+visualagents blueprint       [FOLDER] [--json]
 visualagents pipe            [FOLDER] [--quiet]
 visualagents watch           [FOLDER] --log FILE [--from-start] [--echo]
 visualagents replay          RECORDING [--project DIR] [--speed N] [--instant]
@@ -385,8 +398,8 @@ dashboard options:  --port 7420  --host 127.0.0.1  --no-browser  --blueprint FIL
 | The map doesn't move | The agent isn't working on anything yet — press **▶ Start** and give it a task ([details](#watching-an-agent-live)). |
 | "No virtualenv found" | Create one in the project (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`), or `hook --python /path/to/python`. |
 | The agent fails with import errors | Its own dependencies aren't installed in the environment it runs with — install them, then **▶ Run again**. |
-| The LLM scan failed | VisualAgents falls back to the offline map. Retry, or pick another model (`visualagents models --provider …`). |
-| An agent is missing or misnamed | `visualagents scan <folder> --llm` for a richer map, or edit `.visualagents/blueprint.json`. Agents seen only at runtime still appear (dashed). |
+| The LLM scan failed | VisualAgents falls back to the offline map. Retry, or pick another model (`visualagents models --provider …`); a free Gemini key may have used up its requests for the day. |
+| An agent is missing or misnamed | `visualagents scan <folder> --llm` for a richer map, or edit `.visualagents/blueprint.json` (and don't run `scan` again afterwards: it replaces the file). Agents seen only at runtime still appear (dashed). |
 | Wrong start command | `visualagents run <folder> --pick`. |
 
 ## Development

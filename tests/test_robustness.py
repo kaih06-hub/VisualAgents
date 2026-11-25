@@ -121,18 +121,24 @@ def test_a_table_that_parses_but_nests_too_deep_to_walk_is_skipped(tmp_path):
 
 # -- the static blueprint is the LLM scan's fallback -----------------------------------------------------------
 
-@pytest.mark.parametrize("answer", ["fails", "no agents"])
-def test_the_fallback_blueprint_keeps_its_keywords(monkeypatch, answer):
+@pytest.mark.parametrize("answer", ["fails", "no changes", "removes everything"])
+def test_the_static_map_and_its_keywords_survive_any_answer(monkeypatch, answer):
     monkeypatch.setattr(llm, "detect_provider", lambda preferred="auto": "anthropic")
+    demo = ROOT / "visualagents" / "demo"
+    static = scanner.scan_project(demo, mode="static", log=lambda m: None)
 
     def complete_json(**kw):
         if answer == "fails":
             raise llm.LLMError("quota exceeded")
-        return {"project": "demo", "agents": []}
+        if answer == "removes everything":
+            return {"remove": [{"id": a["id"], "reason": "plumbing", "merge_into": "", "why": ""}
+                               for a in static["agents"]]}
+        return {"project": "demo", "agents": []}  # not even the right shape: nothing to apply
 
     monkeypatch.setattr(llm, "complete_json", complete_json)
-    bp = scanner.scan_project(ROOT / "visualagents" / "demo", mode="auto", log=lambda m: None)
-    assert bp["generated_by"] == "static"
+    bp = scanner.scan_project(demo, mode="auto", log=lambda m: None)
+    assert bp["generated_by"] == ("static" if answer == "fails" else "anthropic:claude-opus-5-5")
+    assert [a["id"] for a in bp["agents"]] == [a["id"] for a in static["agents"]]
     assert all(a["keywords"] for a in bp["agents"])  # what log lines are matched to agents by
 
 

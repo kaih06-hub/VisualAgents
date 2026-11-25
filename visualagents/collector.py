@@ -343,8 +343,31 @@ def _agent_classes(files: list[SourceFile]) -> tuple[dict[str, set[str]], list[t
     return bases, [(f, [n for n in names if agentish(n)]) for f, names in per_file]
 
 
+ROLE_TABLE = re.compile(r"(^|_)(roles?|agents?|personas?|teams?|members?|workers?|experts?|specialists?|crew)(_|$)",
+                        re.I)
+_ROLE_LINE = re.compile(r"^\s*\d+ \w+ = '")  # how _outline_lines writes a role table
+
+
+def _role_table(node: ast.AST) -> tuple[str, list[str]] | None:
+    """A module-level table of names that reads like the project's roles: `AGENT_ROLES = ("explorer", "developer")`,
+    `TEAM = {"scout": ..., "critic": ...}`. Projects that run every role through one generic runner define their
+    agents only here, so the outline shows it."""
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target, value = node.targets[0], node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        target, value = node.target, node.value
+    else:
+        return None
+    if not isinstance(target, ast.Name) or not ROLE_TABLE.search(target.id):
+        return None
+    items = value.keys if isinstance(value, ast.Dict) else value.elts if isinstance(value, (ast.Tuple, ast.List, ast.Set)) else []
+    names = [k.value for k in items if isinstance(k, ast.Constant) and isinstance(k.value, str) and k.value.strip()]
+    return (target.id, names) if len(names) >= 2 else None
+
+
 def _outline_lines(f: SourceFile) -> list[str]:
-    """Classes (with bases and methods), top-level functions and prompt personas, each with its line number."""
+    """Classes (with bases and methods), top-level functions, tables of role names and prompt personas, each with
+    its line number."""
     lines: list[str] = []
     suffix = f.path.suffix.lower()
     if suffix in (".py", ".ipynb"):
@@ -356,6 +379,9 @@ def _outline_lines(f: SourceFile) -> list[str]:
                 lines.append(f"{node.lineno:>5} class {node.name}({bases})" + (f": {', '.join(methods[:12])}" if methods else ""))
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 lines.append(f"{node.lineno:>5} def {node.name}")
+            elif (table := _role_table(node)) is not None:
+                shown = ", ".join(repr(n[:40]) for n in table[1][:10]) + (", …" if len(table[1]) > 10 else "")
+                lines.append(f"{node.lineno:>5} {table[0]} = {shown}")
     elif suffix in (".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"):
         for i, line in enumerate(f.text.splitlines(), 1):
             m = re.match(r"\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(class|function)\s+(\w+)", line)
@@ -385,8 +411,9 @@ def outline(files: list[SourceFile], budget_chars: int) -> str:
         if is_test_file(f.rel, f.text) or f.path.suffix.lower() in CONFIG_EXTS - {".yaml", ".yml"}:
             continue
         body = _outline_lines(f)
-        if len(body) > OUTLINE_LINES:
-            body = body[:OUTLINE_LINES] + [f"      … {len(body) - OUTLINE_LINES} more"]
+        if len(body) > OUTLINE_LINES:  # cut, but a table of role names always stays: it may be all there is of them
+            tables = [x for x in body[OUTLINE_LINES:] if _ROLE_LINE.match(x)]
+            body = body[:OUTLINE_LINES] + tables + [f"      … {len(body) - OUTLINE_LINES - len(tables)} more"]
         blocks.append((rank, f.rel, f.rel + ("\n" + "\n".join(body) if body else "") + "\n"))
     kept, used = [], 0
     for rank, rel, block in sorted(blocks):  # best-ranked first, so they win when the budget is short

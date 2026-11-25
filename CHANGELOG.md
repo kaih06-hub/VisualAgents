@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### LLM scan: checks the static map instead of drawing a new one
+Before, the LLM pass returned a whole new map that replaced the static one, so a model could lose what the code
+states outright: on one LangGraph project it swapped the graph's nodes for the agent classes behind them and lost
+most of the arrows. Now the static map is the base and the model returns changes to it (`visualagents/review.py`):
+- it names and describes blocks, merges a block drawn twice, and takes off plumbing, alternative copies and
+  examples, each with a reason;
+- it adds the agents and handoffs static analysis missed, such as roles in a settings table run by one generic
+  runner, or agents started in parallel whose results go to another. Each addition must quote the line of code it
+  comes from, and one whose quote is not in that file is left out, so the model cannot invent agents;
+- the nodes and wiring of a graph the code builds itself (`add_node`, `add_edge`) stay, even a node that makes no
+  model call, unless the whole graph is an alternative or an example;
+- it can ask to read line ranges it was not shown (files cut to excerpts, code seen only in the outline), once,
+  and only from the files the scan collected;
+- the project outline it reads also lists module-level tables of role names (`AGENT_ROLES = ("explorer", ...)`,
+  `TEAM = {...}`), kept even when a long file's outline is cut: in projects that run every role through one generic
+  runner, that table is the only place the agents are named;
+- if the model fails, or its changes would leave no agents, the static map is shown as before.
+
 ### Scanner: fewer rules that only fit the projects they were written on
 Measured on projects the scanner had never seen (two new held-out sets, `benchmarks/readme_graphs`), it found about
 two thirds of the agents a README draws, against nine in ten on the sets it was tuned on. These changes are general
