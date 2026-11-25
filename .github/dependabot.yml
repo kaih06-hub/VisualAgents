@@ -1,0 +1,11 @@
+# Weekly pull requests that keep the Python dependencies and the GitHub Actions used by CI up to date.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

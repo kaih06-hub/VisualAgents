@@ -137,7 +137,7 @@ def test_camel_agents_are_camel_not_crewai(tmp_path):
             "task = Task(content=question, id='0')\n"
         ),
         # a "crewai" string is not an import, and framework-free agents count for less than CAMEL ones
-        "usecase/sec_tools.py": "HEADERS = {'User-Agent': 'crewai.com bisan@crewai.com'}\n",
+        "usecase/sec_tools.py": "HEADERS = {'User-Agent': 'crewai.com research@example.com'}\n",
         "usecase/main.py": "".join(f"a{i} = Analyst{i}Agent(model_name=m)\n" for i in range(3)),
     })
     bp = scan(tmp_path)

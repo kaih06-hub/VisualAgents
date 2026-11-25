@@ -9,7 +9,13 @@ build/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+# secrets: environment files (a template is fine to commit), private keys, saved API keys
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+keys.json
 # per-project VisualAgents state (example blueprints are kept on purpose)
 .visualagents/runs/
 visualagents/demo/.visualagents/
