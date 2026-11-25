@@ -70,7 +70,7 @@ terminal, on your own machine, with no changes to your code.
 
 ### 1. Install
 
-Requires Python 3.10+.
+Requires Python 3.10+, on macOS or Linux. Windows is not supported yet.
 
 ```bash
 pipx install "visualagents[all]"
@@ -256,6 +256,17 @@ flowchart LR
 3. **Dashboard.** A small local web server streams the state to the browser; the map, steps, feed and ruler are
    rebuilt from the event log, which is what makes rewinding possible.
 
+### How accurate the map is
+
+The map is a first draft, not a guarantee. It is checked against agent projects whose READMEs draw their own agent
+graph ([benchmarks/readme_graphs](https://github.com/kaih06-hub/VisualAgents/tree/main/benchmarks/readme_graphs)).
+On nine projects the scanner had never seen (set 12), the offline scan found about **3 in 4** of the agents those
+diagrams draw and about **4 in 10** of the arrows between them, against about nine in ten agents on the projects
+it was tuned on. Projects that declare their graph in code (LangGraph `add_node` / `add_edge`) come out best;
+roles kept in a settings table and run by one generic runner, agents started in parallel, and agents deployed as
+separate apps come out worst. The optional LLM pass has not been measured on unseen projects yet. Agents the scan
+misses still appear on the live map, dashed, once they run, and you can edit `.visualagents/blueprint.json`.
+
 ## Supported frameworks
 
 | Framework | Mapped from the code | Followed live |
@@ -368,6 +379,9 @@ visualagents replay          RECORDING [--project DIR] [--speed N] [--instant]
 dashboard options:  --port 7420  --host 127.0.0.1  --no-browser  --blueprint FILE  --exit  --rescan
 ```
 
+⚠️ `--host` with anything but `127.0.0.1` lets anyone who can reach that address read your agents' live prompts
+and output, with no password: use it only on a network you trust (see [SECURITY.md](https://github.com/kaih06-hub/VisualAgents/blob/main/SECURITY.md)).
+
 `vagents` is a short alias. `visualagents <command> --help` explains every option.
 
 ### Files it creates
@@ -383,7 +397,9 @@ dashboard options:  --port 7420  --host 127.0.0.1  --no-browser  --blueprint FIL
 
 ## Privacy and security
 
-- The dashboard binds to `127.0.0.1` only; events from your agent need a per-session token.
+- The dashboard binds to `127.0.0.1` only; events from your agent need a per-session token. Reading the dashboard
+  needs no password, so other programs and user accounts on the same computer can open it too
+  ([SECURITY.md](https://github.com/kaih06-hub/VisualAgents/blob/main/SECURITY.md) has the details).
 - Nothing leaves your machine unless you choose an LLM provider. Before code is sent, `.env`, key and credential
   files are skipped and strings that look like API keys are redacted.
 - Saved keys live in `~/.visualagents/keys.json` with owner-only permissions. No telemetry.
