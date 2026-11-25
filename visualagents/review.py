@@ -61,7 +61,7 @@ REVIEW_SCHEMA: dict[str, Any] = _obj({
     })},
     "remove_edges": {"type": "array", "items": _obj({"from": {"type": "string"}, "to": {"type": "string"},
                                                      "why": {"type": "string"}})},
-    "framework": {"type": "string", "description": "langgraph, crewai, autogen, openai-agents, google-adk, custom, ..."},
+    "framework": {"type": "string", "description": "langgraph, crewai, autogen, openai-agents, google-adk, strands, microsoft-agent-framework, pydantic-ai, custom, ..."},
     "summary": {"type": "string", "description": "2-4 sentences describing the overall workflow"},
     "entry": {**_STR_LIST, "description": "ids of the agents that receive the user's query first"},
     "exits": {**_STR_LIST, "description": "ids of the agents that produce the final answer"},

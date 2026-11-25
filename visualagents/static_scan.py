@@ -1,8 +1,9 @@
 """Offline agent detection: reads Python (AST) and JS/TS/YAML (regex) without calling an LLM.
 
 Understands the common shapes of LangGraph, LangChain, CrewAI (code + YAML), AutoGen
-(0.2 and 0.4), the OpenAI Agents SDK, Swarm, Google ADK, smolagents, LlamaIndex, CAMEL and DSPy,
-plus agent classes a project defines itself. The result is a raw blueprint dict; `blueprint.normalize`
+(0.2 and 0.4), the OpenAI Agents SDK, Swarm, Google ADK, smolagents, LlamaIndex, CAMEL, DSPy, Strands,
+Microsoft Agent Framework and PydanticAI, plus agent classes a project defines itself; graphs those wire with objects
+(Strands, Microsoft Agent Framework, ADK 2 workflows, pydantic_graph, CrewAI Flows) are read in `workflows`. The result is a raw blueprint dict; `blueprint.normalize`
 resolves names to ids.
 """
 
@@ -18,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import blueprint as bpmod
-from . import call_sites, run_order
+from . import call_sites, run_order, workflows
 from .collector import SKIP_DIRS, SourceFile, collect, is_test_file, parse_python
 
 _log = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ AGENT_CLASSES = {
 AGENT_FACTORIES = {
     "create_react_agent", "create_agent", "create_tool_calling_agent", "create_openai_functions_agent",
     "create_openai_tools_agent", "create_structured_chat_agent", "initialize_agent", "create_supervisor",
-    "create_swarm", "create_handoff_tool",
+    "create_swarm", "create_handoff_tool", "as_agent",
 }
 GROUP_CLASSES = {"GroupChat", "RoundRobinGroupChat", "SelectorGroupChat", "Swarm", "MagenticOneGroupChat"}
 SEQUENTIAL_CLASSES = {"SequentialAgent", "LoopAgent"}
@@ -53,6 +54,9 @@ FRAMEWORK_IMPORTS = (
     ("smolagents", ("smolagents",)),
     ("llamaindex", ("llama_index",)),
     ("dspy", ("dspy",)),
+    ("strands", ("strands",)),
+    ("microsoft-agent-framework", ("agent_framework", "agent_framework_orchestrations")),
+    ("pydantic-ai", ("pydantic_ai", "pydantic_graph")),
     ("langchain", ("langchain",)),  # and langchain_core, langchain_openai, ...
 )
 # Model calls through LangChain, or no framework at all: other frameworks run their agents on LangChain chat
@@ -118,6 +122,10 @@ class _Collector:
         self.joined: set[str] = set()  # model callers that joined a framework's agents (_join_model_callers)
         self.project_classes: dict[str, list[ast.ClassDef]] = {}  # every class the project defines, by name
         self.node_actions: dict[str, list[tuple[str, ast.AST]]] = {}  # graph node -> (file, what add_node runs for it)
+        self.group_runners: dict[str, str] = {}  # function that runs a swarm / graph -> the agent it starts with
+        self.crew_agents: dict[str, list[str]] = {}  # CrewAI @CrewBase class -> its @agent methods' agents, in order
+        self.flow_crews: list[tuple[str, str]] = []  # (CrewAI Flow step, crew class it kicks off)
+        self.pending_steps: list[tuple[str, str, int]] = []  # workflow nodes named in one file, defined in another
 
     # -- helpers ---------------------------------------------------------
     def vote(self, fw: str, n: int = 1) -> None:
@@ -463,13 +471,17 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                 cfg = re.search(r"agents_config\[['\"]([\w\-]+)['\"]\]", ast.get_source_segment(text, node) or "")
                 name = cfg.group(1) if cfg else node.name
                 c.add_agent(name, file=src.rel, line=node.lineno, aliases=[node.name])
+                owner = _scope(node, parents, (ast.ClassDef,))
+                if owner is not None:  # the crew class a Flow step may kick off
+                    c.crew_agents.setdefault(owner.name, []).append(name)
             if "task" in decos:
                 seg = ast.get_source_segment(text, node) or ""
                 cfg = re.search(r"tasks_config\[['\"]([\w\-]+)['\"]\]", seg)
                 ag = re.search(r"agent\s*=\s*self\.(\w+)\(", seg)
+                owner = _scope(node, parents, (ast.ClassDef,))
                 c.steps.append({"title": _pretty(cfg.group(1) if cfg else node.name),
                                 "agents": [ag.group(1)] if ag else [], "description": "",
-                                "_task": cfg.group(1) if cfg else node.name})
+                                "_task": cfg.group(1) if cfg else node.name, "_crew": owner.name if owner else ""})
 
     for node in ast.walk(tree):  # handoffs wired after the agents exist: a.handoffs = [b, c]; a.handoffs.append(d)
         target, value = None, None
@@ -607,18 +619,26 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                     for n in ast.walk(own)):
                 continue  # the project's own create_agent() that compiles its graph - not a wrapper of a factory
             agent_name = _agent_name_kw(node, tree, c)
+            if not agent_name:
+                made = _names_from_callers(node, parents, c)
+                if made:  # def build(name, ...): return Agent(name=name, ...) - one agent per name the callers pass
+                    for made_name, rel, line, alias in made:
+                        c.add_agent(made_name, file=rel, line=line, aliases=[alias] if alias else [])
+                    continue
             role = _lit(_kw(node, *ROLE_KWARGS)) or ""
             if not agent_name and name == "Agent" and _kw(node, "role") is not None:
                 agent_name = role  # CrewAI: the role is the identity
                 if "crewai" in imported or name not in c.project_classes:  # not the project's own Agent class
                     c.vote("crewai")
             if not agent_name and node.args and _lit(node.args[0]) and name not in AGENT_FACTORIES \
-                    and _name_like(_lit(node.args[0])):
+                    and _name_like(_lit(node.args[0])) and not _MODEL_ID.search(_lit(node.args[0]) or ""):
                 agent_name = _lit(node.args[0])
             if not agent_name and targets:
                 agent_name = targets[0]
             if not agent_name and isinstance(parent, ast.Return) and name in AGENT_CLASSES:
-                agent_name = _enclosing_function(node, parents)  # return CodeAgent(...): the factory names it
+                fn = _enclosing_function(node, parents)  # return CodeAgent(...): the factory names it
+                agent_name = _factory_agent_name(fn) if fn else None
+                targets = [*targets, fn] if fn and fn != agent_name else targets
             if not agent_name:
                 continue
             desc = next((v for v in (_lit(_kw(node, k)) for k in DESC_KWARGS) if v), "")
@@ -678,8 +698,10 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
             continue
 
         # -- teams / crews -----------------------------------------------
+        if name == "Swarm" and "strands" in imported:
+            continue  # a Strands swarm hands off by its agents' choice: workflows reads it
         if name in GROUP_CLASSES or name == "AgentWorkflow":
-            members = _list_refs(_kw(node, "agents", "participants") or (node.args[0] if node.args else None))
+            members =_list_refs(_kw(node, "agents", "participants") or (node.args[0] if node.args else None))
             c.vote("autogen" if name != "AgentWorkflow" else "llamaindex")
             c.group_chats.append({"cls": name, "members": members, "admin": _lit(_kw(node, "admin_name")) or "",
                                   "method": _lit(_kw(node, "speaker_selection_method")) or ""})
@@ -722,6 +744,56 @@ def _scan_python(src: SourceFile, c: _Collector) -> None:
                     c.edges.append({"from": hub, "to": m, "label": "delegates", "conditional": True})
                     c.edges.append({"from": m, "to": hub, "label": "reports", "conditional": True})
                 c.entry.append(hub)
+
+    # graphs wired with objects: Strands, Microsoft Agent Framework, ADK workflows, pydantic_graph, CrewAI Flows
+    workflows.scan_file(tree, src.rel, c, parents, imported)
+
+
+# a model id where a name could be: Agent("openai:gpt-5.2"), Agent("us.anthropic.claude-sonnet-4-5"), Agent("gpt-4o")
+_MODEL_ID = re.compile(r"^[\w.\-]+[:/][\w.\-:/]+$|^(gpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|qwen|deepseek|"
+                       r"grok|command|phi)[\w.\-]*\d", re.I)
+# what a factory function's name says beyond the agent it makes: create_planner_agent() -> planner_agent
+_FACTORY_PREFIX = re.compile(r"^_*(create|build|make|get|new|init|setup|construct|spawn)_(?=\w)", re.I)
+
+
+def _names_from_callers(call: ast.Call, parents: dict[ast.AST, ast.AST], c: Any) -> list[tuple[str, str, int, str]]:
+    """Agent(name=name, ...) inside def build_agent(name, ...): the names the project's calls pass for that parameter
+    (build_agent("strategy_agent", ...)), each with where it is passed and what it is kept as (strategy=...)."""
+    kw = _kw(call, "name", "agent_name")
+    fn = _scope(call, parents, (ast.FunctionDef, ast.AsyncFunctionDef)) if isinstance(kw, ast.Name) else None
+    if fn is None:
+        return []
+    params = [a.arg for a in [*fn.args.posonlyargs, *fn.args.args]]
+    if kw.id not in params and kw.id not in {a.arg for a in fn.args.kwonlyargs}:
+        return []
+    pos = params.index(kw.id) if kw.id in params else None
+    if pos is not None and params[0] in ("self", "cls"):
+        pos -= 1
+    out: dict[str, tuple[str, str, int, str]] = {}
+    for rel, tree in c.trees.items():
+        if rel in c.test_files:
+            continue
+        found = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _call_name(n) == fn.name and n is not call]
+        if not found:
+            continue
+        up = {ch: p for p in ast.walk(tree) for ch in ast.iter_child_nodes(p)}
+        for n in found:
+            arg = _kw(n, kw.id)
+            if arg is None and pos is not None and 0 <= pos < len(n.args):
+                arg = n.args[pos]
+            v = _lit(arg)
+            if not v or "{…}" in v or not _name_like(v):
+                continue
+            holder = up.get(n)  # strategy=build_agent(...) inside a call, or writer = build_agent(...)
+            alias = holder.arg if isinstance(holder, ast.keyword) else \
+                next(iter(_assigned_names(holder)), "") if holder is not None else ""
+            out.setdefault(v, (v, rel, n.lineno, alias or ""))
+    return list(out.values())
+
+
+def _factory_agent_name(fn: str) -> str:
+    name = _FACTORY_PREFIX.sub("", fn)
+    return name if name.lower() not in {"agent", "agents", "llm", "model", "chain"} else fn
 
 
 # keyword arguments that give an agent its model, its prompt or its tools
@@ -2258,13 +2330,23 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
                     node_agent["file"], node_agent["line"] = inner["file"], inner["line"]
                 del c.agents[key]
 
-    # CrewAI sequential crews: tasks run in order, so their agents hand off in order
-    if c.steps and not c.edges:
-        seq = [s["agents"][0] for s in c.steps if s["agents"]]
+    # CrewAI sequential crews: tasks run in order, so their agents hand off in order - crew by crew, unless the
+    # crew's agents are wired some other way (a hierarchical manager); a crew a Flow step runs starts from that step
+    crews: dict[str, list[str]] = {}
+    for s in c.steps:
+        if s["agents"]:
+            crews.setdefault(s.get("_crew", ""), []).append(s["agents"][0])
+    run_by_flow = {crew for _, crew in c.flow_crews}
+    wired = list(c.edges)
+    for crew, seq in crews.items():
+        members = {bpmod.norm_key(a) for a in seq}
+        if (not crew and wired) or any(bpmod.norm_key(e["from"]) in members or bpmod.norm_key(e["to"]) in members
+                                       for e in wired):
+            continue
         for a, b in zip(seq, seq[1:]):
             if bpmod.norm_key(a) != bpmod.norm_key(b):
                 c.edges.append({"from": a, "to": b, "label": "next task", "conditional": False})
-        if seq:
+        if crew not in run_by_flow:
             c.entry.append(seq[0])
             c.exits.append(seq[-1])
 
@@ -2280,6 +2362,8 @@ def scan(root: Path, files: list[SourceFile] | None = None, facts: dict[str, Any
     _companion_agents(c)
     _record_hub(c)
     run_order.link(c)
+    workflows.finish(c)
+    _agents_as_tools(c)
     _tool_delegation(c)
     _fold_agents_into_their_node(c)
 
@@ -2713,6 +2797,20 @@ def _companion_agents(c: _Collector) -> None:
                     known |= {name, ctor, var}
 
 
+def _agents_as_tools(c: _Collector) -> None:
+    """An agent listed among another agent's tools is run by it as a tool (Strands wraps an Agent given in `tools=`;
+    other frameworks take the agent's as_tool() there): an arrow to that agent, not a tool."""
+    for key, ag in list(c.agents.items()):
+        kept = []
+        for t in ag["tools"]:
+            other = c.var_to_agent.get(t)
+            if other and other != key and other in c.agents and t not in c.tool_funcs and t not in c.functions:
+                c.edges.append({"from": ag["name"], "to": t, "label": "as tool", "conditional": True})
+            else:
+                kept.append(t)
+        ag["tools"] = kept
+
+
 def _tool_delegation(c: _Collector) -> None:
     """Hand-offs through functions given to an agent - tools=[delegate_to_math], @supervisor.tool, a helper registering
     them (register_tools(supervisor, [delegate_to_math])), or supervisor.check = validate - that run another agent
@@ -2743,6 +2841,28 @@ def _tool_delegation(c: _Collector) -> None:
         return {n.func.value.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr in _RUNS and isinstance(n.func.value, ast.Name) and n.func.value.id in params}
 
+    tables: dict[str, list[str]] = {}  # module-level dicts of agents: SPECIALISTS = {Kind.GP: gp_agent, ...}
+    for rel, tree in c.trees.items():
+        for n in tree.body if rel not in c.test_files else []:
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict) and len(n.targets) == 1 and \
+                    isinstance(n.targets[0], ast.Name):
+                found = [a for a in (agent_of(v) for v in n.value.values) if a]
+                if len(found) >= 2 and len(found) == len(n.value.values):
+                    tables[n.targets[0].id] = found
+
+    def picked(var: ast.AST, fn: ast.AST) -> list[str]:
+        """specialist = SPECIALISTS.get(kind) / SPECIALISTS[kind], then specialist.run(...): any agent of the table."""
+        if not isinstance(var, ast.Name) or not tables:
+            return []
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == var.id for t in n.targets):
+                v = n.value
+                src = v.value if isinstance(v, ast.Subscript) else v.func.value if isinstance(v, ast.Call) and \
+                    isinstance(v.func, ast.Attribute) and v.func.attr == "get" else None
+                if isinstance(src, ast.Name) and src.id in tables:
+                    return tables[src.id]
+        return []
+
     def run_order(fn: ast.AST, depth: int = 0, seen: frozenset = frozenset()) -> list[str]:
         out: list[str] = []
         for call in _calls_in_order(fn):
@@ -2750,8 +2870,12 @@ def _tool_delegation(c: _Collector) -> None:
             f = call.func
             if isinstance(f, ast.Attribute) and f.attr in _RUNS and agent_of(f.value):
                 ran = [agent_of(f.value)]
+            elif isinstance(f, ast.Attribute) and f.attr in _RUNS and picked(f.value, fn):
+                ran = picked(f.value, fn)
             elif isinstance(f, ast.Attribute) and f.attr in _RUNS and _ref(f.value) == "Runner" and call.args:
                 ran = [a for a in [agent_of(call.args[0])] if a]
+            elif isinstance(f, ast.Name) and f.id not in defs and agent_of(f):  # agents that are called: agent(task)
+                ran = [agent_of(f)]
             elif isinstance(f, ast.Name):  # a function of the project (asyncio.run(...) is not)
                 for d in defs.get(f.id, [])[:3]:
                     if id(d) in seen or depth >= 3:

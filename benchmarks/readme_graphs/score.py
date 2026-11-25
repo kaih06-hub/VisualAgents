@@ -150,7 +150,7 @@ def score(repo, bp, gt=None):
             used.add(hit)
         elif hit:
             dup.append(a["id"])
-        elif any(re.search(g["real_extra"], k) for k in keys(a)):
+        elif any(re.search(g.get("real_extra", r"$^"), k) for k in keys(a)):
             extra.append(a["id"])
         else:
             wrong.append(a["id"])
@@ -207,9 +207,10 @@ def sets():
     from ground_truth_set11 import GT11
     from ground_truth_set12 import GT12
     from ground_truth_set13 import GT13
+    from ground_truth_set14 import GT14
     return {"set1": GT, "set2": GT2, "set3": GT3, "set4": GT4, "set5": GT5, "set6": GT6, "set7": GT7,
             "set8": GT8, "set9": GT9, "set10": GT10, "set11": GT11, "set12": GT12,
-            "set13": GT13}
+            "set13": GT13, "set14": GT14}
 
 
 if __name__ == "__main__":

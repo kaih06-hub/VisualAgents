@@ -97,3 +97,27 @@ Where sets 12 and 13 still fail, by kind of code rather than by project:
 
 `ground_truth_set10.py` ... `ground_truth_set13.py` hold the projects and pinned commits;
 `score.py <out> set10|set11|set12|set13` scores a folder of blueprints against them.
+
+## Set 14: five frameworks on unseen projects (2026-11-25)
+
+The `framework-support` work added rules for CrewAI Flows, Google ADK 2 workflows, PydanticAI and pydantic_graph,
+Strands Agents and Microsoft Agent Framework, written from those frameworks' source and their own sample
+repositories. Set 14 measures it on fourteen community projects built with them, three per framework (two for
+Strands), picked by a fixed rule from topic and code searches (see the docstring of `ground_truth_set14.py`), with
+the answer key written from each README diagram and frozen before any scan.
+
+| First run on unseen projects (static mode) | agents found | blocks that are README agents | blocks that are real agents | arrows found | arrows right |
+|---|---|---|---|---|---|
+| set 14, `main` (8e4b399) | 0.71 | 0.60 | 0.67 | 0.43 | 0.29 |
+| set 14, `framework-support` | 0.78 | 0.62 | 0.70 | 0.60 | 0.50 |
+
+Three of the fourteen READMEs draw no arrows between agents; they count as all arrows found on both versions. The gain
+comes from workflows declared with the framework's builder: a Microsoft Agent Framework `WorkflowBuilder` pipeline
+(arrows 0 -> 1.0), a second one built from agent classes (0 -> 0.67) and an ADK 2 workflow (agents 0.23 -> 0.92, arrows
+0 -> 0.59). Still missed, by kind of code:
+- PydanticAI and CrewAI projects whose agents a project's own planner, executor or router class runs (foodmind.ai
+  0.12 of the agents on both versions, AI_Exam_Assistant 0 -> 0.33), and a CrewAI crew whose manager the README draws (no arrows);
+- agents that call each other over A2A (gemini-tales-v2: all agents, no arrows) or run as separate apps (sample-agent-interoperability:
+  the two ADK agents come out as `create_agent` and `root_agent`);
+- a CrewAI project that carries its virtualenv in the repository (et_ai_hackathon: 1 of 3).
+

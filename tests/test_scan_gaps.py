@@ -299,9 +299,10 @@ def test_agents_built_by_factories_with_constant_names(tmp_path):
             "    return ResearchAgent(llm=llm, cache=None)  # the project's own class, not a framework agent\n"),
     })
     bp = scan(tmp_path)
-    assert {"build_agent", "build_team", "web_researcher", "media_analyst"} <= set(ids(bp))
+    # a factory names the agent it returns, without its verb: build_team() -> "team" (build_agent() keeps its name)
+    assert {"build_agent", "team", "web_researcher", "media_analyst"} <= set(ids(bp))
     assert "create_agent" not in ids(bp) and "make_researcher" not in ids(bp)
-    assert {("build_team", "web_researcher"), ("build_team", "media_analyst")} <= edges(bp)
+    assert {("team", "web_researcher"), ("team", "media_analyst")} <= edges(bp)
 
 
 def test_delegation_through_tool_functions_and_run_helpers(tmp_path):

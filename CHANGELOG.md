@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Five more frameworks mapped from their code
+The map now reads how CrewAI, Google ADK, PydanticAI, Strands Agents and Microsoft Agent Framework wire agents
+together, with each project's own framework on the badge (`strands`, `microsoft-agent-framework`, `pydantic-ai`).
+The rules come from those frameworks' current source and sample repositories; on fourteen unseen projects built with
+them (`benchmarks/readme_graphs`, set 14) the offline scan found 0.78 of the agents their READMEs draw (0.71 before)
+and 0.60 of the arrows (0.43 before).
+- Strands: `GraphBuilder` graphs (`add_node(agent, "id")` names a node after the agent object), `Swarm` hand-offs
+  read from the members each prompt names, agents listed in another agent's `tools=`, `@tool` functions that call an
+  agent, and a tool that runs a swarm.
+- Microsoft Agent Framework: `WorkflowBuilder` (`start_executor`, `add_edge`, fan-out / fan-in edges, chains,
+  switch-case and multi-selection groups), executors (`Executor` classes, `@executor` functions, `AgentExecutor`),
+  `as_agent` / `ChatAgent`, and the sequential, concurrent, handoff, group-chat and Magentic orchestration builders.
+- Google ADK 2 workflows: `Workflow(edges=[("START", a, b), (b, {"route": c})])` chains, routes, fan-out and `Edge`
+  objects, with steps built by `FunctionNode` or a project helper; a step that calls no model is still a block.
+- PydanticAI: a model id given first (`Agent("openai:gpt-5.2", ...)`) is no longer taken for the agent's name, a
+  tool that runs an agent picked from a table (`SPECIALISTS.get(kind).run(...)`) hands work to each of them, and
+  `pydantic_graph` `BaseNode` classes draw their edges from `run()`'s return annotation.
+- CrewAI Flows: `@start()`, `@listen(step)`, `@router(step)` and the labels a router returns are the steps and
+  arrows; a step that kicks off a crew hands work to the crew's first agent, and each crew's tasks run in order.
+- Every framework: an agent built by a factory is named after the names its callers pass
+  (`build_agent("strategy_agent", ...)`), and a factory's verb is dropped from the name (`create_planner_agent()`
+  makes `planner_agent`).
+
 ## 0.2.0 — 2026-11-25
 
 A month of scanner and security work since 0.1.1. **Upgrade if you scan repositories you did not write, or run
