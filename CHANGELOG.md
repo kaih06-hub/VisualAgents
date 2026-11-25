@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-25
+
+A month of scanner and security work since 0.1.1. **Upgrade if you scan repositories you did not write, or run
+the dashboard:** 0.1.1 lacks the fixes under Security below.
+
+- The LLM scan now checks the static map and adds what it missed, instead of drawing a new map that could lose
+  what the code states outright.
+- The static scanner reads many more shapes of agent system, by general rules rather than per-project ones. On
+  projects nobody tuned it on, it finds about 7 in 10 of the agents a README draws and about 4 in 10 of the arrows
+  (see "How accurate the map is" in the README).
+- Scanning someone else's repository can no longer send your API key, or files outside the repository, anywhere;
+  a web page cannot read or start the dashboard; a malformed request can no longer freeze it.
+
+### Upgrading from 0.1.1
+- A project's `.env` can still supply API keys and model names, but no longer the provider or where requests go
+  (`VISUALAGENTS_PROVIDER`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, Vertex AI settings). Set those in your own
+  environment, with `--provider`, or with `visualagents setup`; the scan says when it ignored one.
+- The dashboard's Start and Reset (`/api/start`, `/api/reset`) need the run's session token, which the page gets
+  when opened on this computer.
+
+### Dashboard and diagnostics
+- The dashboard refuses a request whose `Content-Length` is not a plain number (400) or is over 8 MB (413), and
+  checks the Host header before reading the body. Before, a request announcing a body it never sent kept the
+  connection waiting forever. Tokens are compared in constant time.
+- `VISUALAGENTS_DEBUG=1` logs why a quiet fallback happened: the dashboard probe, the hook's hello, `unhook`'s
+  site-packages lookup, an unreadable `pyproject.toml`, a YAML config the scanner could not parse.
+- Docs: the README says how accurate the map is on unseen projects, that macOS and Linux are supported (not
+  Windows yet), and warns that `--host` shows live prompts to the network; `SECURITY.md` lists what the dashboard
+  serves without a password, what leaves your computer, and how keys are stored.
+- Project: `ruff` runs in CI and comes with the `dev` extra; Dependabot watches dependencies and GitHub Actions.
 
 ### LLM scan: checks the static map instead of drawing a new one
 Before, the LLM pass returned a whole new map that replaced the static one, so a model could lose what the code
