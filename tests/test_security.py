@@ -133,6 +133,42 @@ def test_the_dashboard_answers_only_requests_addressed_to_this_computer():
         server.stop()
 
 
+def test_a_bad_content_length_is_refused_at_once():
+    """A negative length used to make the server wait for the client to hang up; text made it raise."""
+    hub, server = _server()
+    try:
+        for given in ("-1", "abc", "1e3", "+5", "²"):  # "²" counts as a digit to str.isdigit, not to int()
+            status, body = _req(server, "POST", "/api/ingest", headers={"Content-Length": given}, body="[]")
+            assert (status, json.loads(body)["error"]) == (400, "invalid Content-Length"), given
+        assert _req(server, "GET", "/api/state")[0] == 200  # and it still answers
+    finally:
+        server.stop()
+
+
+def test_a_body_over_the_limit_is_refused_not_cut_short():
+    hub, server = _server()
+    try:
+        status, _ = _req(server, "POST", "/api/ingest", body="[]",
+                         headers={"Content-Length": str(server_mod.MAX_BODY + 1),
+                                  "X-VisualAgents-Token": server.projects.token})
+        assert status == 413
+        events = {"type": "agent_start", "agent": "writer"}
+        status, body = _req(server, "POST", "/api/ingest", body=json.dumps(events),
+                            headers={"X-VisualAgents-Token": server.projects.token})
+        assert status == 200 and json.loads(body)["count"] == 1  # a normal one still goes through
+    finally:
+        server.stop()
+
+
+def test_a_request_for_another_host_is_turned_away_before_its_body_is_read():
+    hub, server = _server()
+    try:
+        evil = f"evil.example:{server.port}"
+        assert _req(server, "POST", "/api/ingest", evil, {"Content-Length": "-1"}, "[]")[0] == 421
+    finally:
+        server.stop()
+
+
 def test_start_and_reset_need_the_session_token_from_the_page():
     hub, server = _server()
     try:

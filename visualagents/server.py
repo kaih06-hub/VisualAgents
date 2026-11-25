@@ -26,6 +26,7 @@ _TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 LOOPBACK_CLIENTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 SESSION_HEADER = "X-VisualAgents-Session"
+MAX_BODY = 8_000_000  # bytes: a batch of events from an agent is far smaller
 
 
 def is_loopback(host: str) -> bool:
@@ -99,6 +100,31 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.MISDIRECTED_REQUEST, b"this dashboard only answers 127.0.0.1 / localhost", "text/plain")
         return False
 
+    def _refuse(self, status: int, error: str) -> None:
+        """Answer and close: a request whose body is left unread cannot share the connection with the next one."""
+        self.close_connection = True
+        self._send(status, json.dumps({"error": error}).encode("utf-8"), extra={"Connection": "close"})
+
+    def _body(self) -> bytes | None:
+        """The request body, or None after refusing a Content-Length that is not a plain number (a negative one
+        would make the read wait for the client to hang up) or that is over MAX_BODY."""
+        given = (self.headers.get("Content-Length") or "").strip()
+        if not given:
+            return b""
+        if not (given.isascii() and given.isdigit()):
+            self._refuse(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return None
+        length = int(given)
+        if length > MAX_BODY:
+            self._refuse(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"request body over {MAX_BODY} bytes")
+            return None
+        return self.rfile.read(length) if length else b""
+
+    def _token_ok(self) -> bool:
+        """The events token, compared in constant time."""
+        given = (self.headers.get("X-VisualAgents-Token") or "").encode()
+        return hmac.compare_digest(given, str(self.projects.token).encode())
+
     def _may_control(self) -> bool:
         """Start / reset: same origin, and the session token the page was served with."""
         token = self.headers.get(SESSION_HEADER) or ""
@@ -142,7 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/blueprint":
             self._json(self._hub(url).blueprint)
         elif path == "/api/daemon":  # proof that daemon.json still names this process (see home.read_daemon)
-            if self.headers.get("X-VisualAgents-Token") != self.projects.token:
+            if not self._token_ok():
                 self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
             else:
                 self._json({"pid": self.projects.pid})
@@ -155,12 +181,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(min(length, 8_000_000)) if length else b""
-        if not self._host_ok():
+        if not self._host_ok():  # before reading anything a page re-pointed at 127.0.0.1 sends
+            self.close_connection = True  # its body is left unread
+            return
+        raw = self._body()
+        if raw is None:
             return
         if path == "/api/ingest":
-            if self.headers.get("X-VisualAgents-Token") != self.projects.token:
+            if not self._token_ok():
                 self._json({"error": "bad token"}, HTTPStatus.FORBIDDEN)
                 return
             try:
