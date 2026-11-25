@@ -46,8 +46,9 @@ terminal, on your own machine, with no changes to your code.
 
 ## Highlights
 
-- **Maps agent projects from their code.** Static analysis understands LangGraph, CrewAI, AutoGen, the OpenAI Agents
-  SDK, Swarm, Google ADK, smolagents, LlamaIndex, DSPy and CAMEL - and with no framework at all, every place that
+- **Maps agent projects from their code.** Static analysis understands LangGraph, CrewAI (crews and Flows), AutoGen,
+  the OpenAI Agents SDK, Swarm, Google ADK (including ADK 2 workflows), Strands Agents, Microsoft Agent Framework,
+  PydanticAI and pydantic_graph, smolagents, LlamaIndex, DSPy and CAMEL - and with no framework at all, every place that
   prompts a model is an agent, even if there is only one. An optional LLM pass (Claude, GPT, Gemini or a local model)
   checks that map against the code and adds roles, tools, missed agents and handoffs, and the step-by-step workflow.
 - **Live map.** The working agent glows with a thought bubble, handoffs animate along the arrows (with ×N counts
@@ -264,7 +265,11 @@ On two sets of nine projects the scanner had never seen (sets 12 and 13), the of
 the agents those diagrams draw (0.73 and 0.69) and about **4 in 10** of the arrows between them (0.42 and 0.40),
 against about nine in ten agents on the projects it was tuned on. Projects that declare their graph in code (LangGraph `add_node` / `add_edge`) come out best;
 roles kept in a settings table and run by one generic runner, agents started in parallel, agents deployed as
-separate apps, Google ADK workflows and agents built by factory functions come out worst. The optional LLM pass has not been measured on unseen projects yet. Agents the scan
+separate apps, Google ADK workflows and agents built by factory functions come out worst. A fourteenth set checks
+five frameworks on fourteen unseen projects (CrewAI, Google ADK, PydanticAI, Strands, Microsoft Agent Framework): about
+**8 in 10** of the agents (0.78) and **6 in 10** of the arrows (0.60). Workflows declared with the framework's builder
+(Microsoft Agent Framework, ADK 2, Strands graphs) came out best; agents run by a project's own planner or router
+class, and agents that call each other over A2A, came out worst. The optional LLM pass has not been measured on unseen projects yet. Agents the scan
 misses still appear on the live map, dashed, once they run, and you can edit `.visualagents/blueprint.json`.
 
 ## Supported frameworks
@@ -273,11 +278,15 @@ misses still appear on the live map, dashed, once they run, and you can edit `.v
 |---|---|---|
 | **LangGraph** | `add_node`, `add_edge`, `add_conditional_edges`, `Command(goto=…)`, `create_react_agent`, supervisors | callbacks: exact node turns, LLM replies, tool calls |
 | **LangChain** | agents and their tools | callbacks: thoughts, actions, results |
-| **CrewAI** | `Agent` / `Task` / `Crew`, `config/agents.yaml` + `tasks.yaml`, hierarchical crews | console format |
+| **CrewAI** | `Agent` / `Task` / `Crew`, `config/agents.yaml` + `tasks.yaml`, hierarchical crews, Flows (`@start` / `@listen` / `@router`, and the crews a step kicks off) | console format |
 | **AutoGen** 0.2 / 0.4 | agents, `GroupChat`, `RoundRobinGroupChat`, `SelectorGroupChat`, `Swarm`, `initiate_chat` | console format |
 | **OpenAI Agents SDK** | `Agent(handoffs=…)`, `as_tool` | tracing: agent spans, handoffs, tools |
 | **No framework** - OpenAI, Anthropic, Gemini, LiteLLM, Ollama, mlx-lm, llama.cpp, transformers, vLLM, Groq, Hugging Face, LangChain chat models | every function or class that calls a model is an agent (a shared `generate_reply()`-style helper is not: its callers are); one call site = a one-agent system | each call credited to the code that made it, with its prompt, reply, reasoning, tool calls and results |
-| **Swarm**, **Google ADK**, **smolagents**, **LlamaIndex** | `transfer_to_*`, `sub_agents`, `managed_agents`, `AgentWorkflow` | console patterns, `--smart` |
+| **Google ADK** | `sub_agents`, `Sequential` / `Parallel` / `LoopAgent`, `AgentTool`, ADK 2 `Workflow(edges=[...])` chains, routes and fan-out | console patterns, `--smart` |
+| **Strands Agents** | `Agent(...)`, agents given as tools (directly or through `@tool` functions), `GraphBuilder`, `Swarm` | model calls through the libraries above (not Bedrock); not yet tested end to end |
+| **Microsoft Agent Framework** | `Agent` / `ChatAgent` / `as_agent`, `WorkflowBuilder` edges, fan-out / fan-in, chains and switch-case groups, executors, sequential / concurrent / handoff / group-chat / Magentic builders | model calls through the libraries above; not yet tested end to end |
+| **PydanticAI** | `Agent(...)`, delegation through `@agent.tool` functions (also to an agent picked from a table), `pydantic_graph` `BaseNode` graphs | model calls through the libraries above; not yet tested end to end |
+| **Swarm**, **smolagents**, **LlamaIndex** | `transfer_to_*`, `managed_agents`, `AgentWorkflow` | console patterns, `--smart` |
 | **DSPy**, **CAMEL** | `dspy.Module` programs and their `Predict` / `ChainOfThought` steps, `ChatAgent` | each model call credited to the code that made it, console patterns |
 | **LangGraph.js**, JS/TS agents | `addNode` / `addEdge` / `addConditionalEdges`, `new Agent({ name })` | console patterns |
 | **Anything else** | the LLM pass | console patterns, `--smart`, or the SDK below |
